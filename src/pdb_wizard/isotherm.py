@@ -1,0 +1,316 @@
+"""Isotherm planner — generates MPMC input directories at multiple pressures.
+
+The actual MPMC input file is rendered from `templates/mpmc_uvt.inp` via the
+template engine; this module supplies the per-pressure derived variables
+(box size, sorbate placement, file paths) and writes the supporting files
+(input.pqr, insert.pqr, run.sh).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+
+from pdb_wizard.io import write_mpmc_pdb
+from pdb_wizard.molecule import Molecule
+from pdb_wizard.sorbates import format_sorbate_pqr
+from pdb_wizard.templates import load_template, render
+
+# Default MPMC LJ cutoff in Å. The simulation needs min(a,b,c)/2 > this.
+_DEFAULT_LJ_CUTOFF = 10.0
+# A charge is "set" if |q| exceeds this — anything smaller is rounding noise.
+_CHARGE_NONZERO = 1e-9
+# An LJ parameter is "set" if epsilon > this — typical organic atom epsilon
+# is 30-150 K, hydrogen is ~10 K, so 0.1 K is a safe lower bound for "applied".
+_EPSILON_SET = 0.1
+# Sorbate–framework overlap distance (Å) below which we warn.
+_SORBATE_OVERLAP = 1.5
+
+
+def validate_for_mpmc(
+    mol: Molecule,
+    sorbate_pos: tuple[float, float, float] | None = None,
+    lj_cutoff: float = _DEFAULT_LJ_CUTOFF,
+) -> tuple[list[str], list[str]]:
+    """Inspect a molecule for common MPMC-input footguns.
+
+    Returns (errors, warnings). 'errors' block generation outright; 'warnings'
+    let the user proceed but flag likely issues.
+
+    Errors:
+      - No PBC (MPMC requires a periodic box)
+      - All charges effectively zero (zero electrostatics — meaningless)
+      - All epsilon/sigma effectively zero (zero LJ — sorbate floats freely)
+
+    Warnings:
+      - |net charge| > 1e-3 e (non-neutral box)
+      - min(a,b,c)/2 < lj_cutoff (box too small for default LJ cutoff)
+      - Sorbate placement overlaps a framework atom (within 1.5 Å)
+      - Triclinic cell (α/β/γ deviates from 90° — abcbasis loses info)
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if mol.pbc is None:
+        errors.append("Molecule has no PBC. MPMC requires a periodic cell — "
+                      "use 'Update Unit Cell' to add one.")
+        return errors, warnings  # other checks need PBC
+
+    n = len(mol.atoms)
+    if n == 0:
+        errors.append("Molecule has no atoms.")
+        return errors, warnings
+
+    # Charges
+    charges = np.array([a.charge for a in mol.atoms])
+    n_set = int((np.abs(charges) > _CHARGE_NONZERO).sum())
+    if n_set == 0:
+        errors.append(
+            "All atom charges are zero. Apply a force field or "
+            "Generate QEq Charges before planning the isotherm — otherwise "
+            "MPMC computes no electrostatics and the uptake is meaningless."
+        )
+    else:
+        net_q = float(charges.sum())
+        if abs(net_q) > 1e-3:
+            warnings.append(
+                f"Net system charge = {net_q:+.4f} e (non-neutral). "
+                f"MPMC assumes a neutral simulation cell — add counterions "
+                f"or rescale charges before running."
+            )
+
+    # LJ parameters
+    epsilons = np.array([a.epsilon for a in mol.atoms])
+    n_lj_set = int((epsilons > _EPSILON_SET).sum())
+    if n_lj_set == 0:
+        errors.append(
+            "All Lennard-Jones epsilon values are zero. Apply a force field "
+            "(OPLS-AA or PHAHST) before planning — without LJ, MPMC sees no "
+            "framework potential and the sorbate just floats."
+        )
+    elif n_lj_set < n // 2:
+        warnings.append(
+            f"Only {n_lj_set}/{n} atoms have nonzero LJ epsilon. "
+            f"Some elements are likely missing from the chosen force field."
+        )
+
+    # Box size vs LJ cutoff
+    pbc = mol.pbc
+    half_min = min(pbc.a, pbc.b, pbc.c) / 2.0
+    if half_min < lj_cutoff:
+        warnings.append(
+            f"Smallest box half-length is {half_min:.2f} Å but MPMC's default "
+            f"LJ cutoff is {lj_cutoff:.1f} Å. Either build a supercell "
+            f"(Edit > Extend Axis) or reduce the cutoff in mpmc.inp."
+        )
+
+    # Triclinic cell
+    if (abs(pbc.alpha - 90.0) > 0.5
+            or abs(pbc.beta - 90.0) > 0.5
+            or abs(pbc.gamma - 90.0) > 0.5):
+        warnings.append(
+            f"Cell is not orthorhombic (α={pbc.alpha:.2f}, β={pbc.beta:.2f}, "
+            f"γ={pbc.gamma:.2f}). 'abcbasis' in mpmc.inp loses skew "
+            f"information; use 'pbc_input' with the basis matrix instead."
+        )
+
+    # Sorbate placement overlap
+    if sorbate_pos is None:
+        cx, cy, cz = mol.center()
+    else:
+        cx, cy, cz = sorbate_pos
+    coords = np.array([a.x for a in mol.atoms])
+    dx = coords - np.array([float(cx), float(cy), float(cz)])
+    # Min-image distance to the sorbate placement
+    frac = dx @ pbc.reciprocal_basis_matrix
+    frac -= np.round(frac)
+    dx = frac @ pbc.basis_matrix
+    dists = np.linalg.norm(dx, axis=1)
+    n_overlap = int((dists < _SORBATE_OVERLAP).sum())
+    if n_overlap > 0:
+        warnings.append(
+            f"Sorbate placement at ({cx:.2f}, {cy:.2f}, {cz:.2f}) overlaps "
+            f"{n_overlap} framework atom{'s' if n_overlap != 1 else ''} "
+            f"(within {_SORBATE_OVERLAP} Å). Use 'sorbate_pos=' to pick a "
+            f"pore center, or let MPMC's μVT insertion handle placement."
+        )
+
+    return errors, warnings
+
+
+def _pressure_dir_name(pressure: float) -> str:
+    p_str = f"{pressure:.4g}".replace(".", "p").replace("-", "m")
+    return f"P_{p_str}_atm"
+
+
+def generate_isotherm(
+    mol: Molecule,
+    sorbate_model: str,
+    temperature: float,
+    pressures: list[float],
+    output_dir: str,
+    numsteps: int = 500000,
+    corrtime: int = 1000,
+    ensemble: str = "uvt",
+    sorbate_pos: tuple[float, float, float] | None = None,
+    insert_probability: float = 0.667,
+    move_factor: float = 0.01,
+    rot_factor: float = 0.01,
+) -> list[str]:
+    """Generate MPMC input directories for an isotherm.
+
+    Creates one subdirectory per pressure point with:
+      - input.pqr   : framework + sorbate, charges + LJ params
+      - mpmc.inp    : rendered from templates/mpmc_uvt.inp
+      - insert.pqr  : sorbate-only insert pool
+      - run.sh      : launch script
+
+    Args:
+        mol: MOF structure with PBC.
+        sorbate_model: Sorbate model name (from sorbates.py).
+        temperature: Temperature in Kelvin.
+        pressures: List of pressures in atm.
+        output_dir: Base directory for all pressure subdirs.
+        numsteps: MC steps per pressure point.
+        corrtime: Correlation time for sampling.
+        ensemble: "uvt" for grand canonical, "nvt" for canonical.
+        sorbate_pos: Optional (x, y, z) for sorbate placement. Auto if None.
+        insert_probability, move_factor, rot_factor: MPMC move probabilities.
+
+    Returns:
+        List of created directory paths.
+    """
+    if mol.pbc is None:
+        raise ValueError("Molecule must have PBC for MPMC simulation")
+
+    pbc = mol.pbc
+    base = Path(output_dir)
+    base.mkdir(parents=True, exist_ok=True)
+
+    if sorbate_pos is None:
+        center = mol.center()
+        sx, sy, sz = float(center[0]), float(center[1]), float(center[2])
+    else:
+        sx, sy, sz = sorbate_pos
+
+    sorbate_lines = format_sorbate_pqr(
+        sorbate_model, sx, sy, sz, mol_id=2, start_atom_id=len(mol.atoms) + 1,
+    )
+
+    template = load_template("mpmc_uvt.inp")
+    created_dirs: list[str] = []
+
+    for pressure in pressures:
+        p_name = _pressure_dir_name(pressure)
+        p_dir = base / p_name
+        p_dir.mkdir(exist_ok=True)
+
+        pqr_path = str(p_dir / "input.pqr")
+        write_mpmc_pdb(
+            mol, pqr_path,
+            write_charges=True, write_params=True, sorbate_lines=sorbate_lines,
+        )
+
+        rendered = render(template, {
+            "job_name": f"isotherm_{p_name}",
+            "ensemble": ensemble,
+            "cell_a": f"{pbc.a:.4f}",
+            "cell_b": f"{pbc.b:.4f}",
+            "cell_c": f"{pbc.c:.4f}",
+            "cell_alpha": f"{pbc.alpha:.2f}",
+            "cell_beta": f"{pbc.beta:.2f}",
+            "cell_gamma": f"{pbc.gamma:.2f}",
+            "temperature": f"{temperature:.1f}",
+            "pressure": pressure,
+            "numsteps": numsteps,
+            "corrtime": corrtime,
+            "insert_probability": insert_probability,
+            "move_factor": move_factor,
+            "rot_factor": rot_factor,
+            "pqr_input": "input.pqr",
+        })
+        (p_dir / "mpmc.inp").write_text(rendered)
+
+        # insert.pqr — just the sorbate atoms + END
+        (p_dir / "insert.pqr").write_text("\n".join(sorbate_lines) + "\nEND\n")
+
+        # run.sh
+        run_path = p_dir / "run.sh"
+        run_path.write_text("#!/bin/bash\nmpmc mpmc.inp\n")
+        run_path.chmod(0o755)
+
+        created_dirs.append(str(p_dir))
+
+    # Master run-all script
+    run_all = base / "run_all.sh"
+    lines = ["#!/bin/bash", f"# Isotherm: {sorbate_model} at {temperature} K", ""]
+    for p_dir_str in created_dirs:
+        p_name = Path(p_dir_str).name
+        lines.append(f"echo 'Running {p_name}...'")
+        lines.append(f"cd {p_name} && mpmc mpmc.inp > mpmc.log 2>&1 && cd ..")
+    lines.append("")
+    lines.append("echo 'All pressure points complete.'")
+    run_all.write_text("\n".join(lines) + "\n")
+    run_all.chmod(0o755)
+
+    return created_dirs
+
+
+def parse_isotherm_results(base_dir: str) -> list[tuple[float, float]]:
+    """Parse MPMC output to extract isotherm data (pressure, uptake).
+
+    Reads histogram.dat or energy.dat from each pressure subdirectory.
+
+    Returns:
+        List of (pressure_atm, avg_molecules) tuples, sorted by pressure.
+    """
+    base = Path(base_dir)
+    results = []
+
+    for p_dir in sorted(base.iterdir()):
+        if not p_dir.is_dir() or not p_dir.name.startswith("P_"):
+            continue
+        p_str = p_dir.name.replace("P_", "").replace("_atm", "").replace("p", ".").replace("m", "-")
+        try:
+            pressure = float(p_str)
+        except ValueError:
+            continue
+
+        hist_file = p_dir / "histogram.dat"
+        if hist_file.exists():
+            try:
+                lines = hist_file.read_text().strip().split("\n")
+                total_n = 0.0
+                total_p = 0.0
+                for line in lines:
+                    if line.startswith("#"):
+                        continue
+                    tokens = line.split()
+                    if len(tokens) >= 2:
+                        n = float(tokens[0])
+                        prob = float(tokens[1])
+                        total_n += n * prob
+                        total_p += prob
+                if total_p > 0:
+                    avg_n = total_n / total_p
+                    results.append((pressure, avg_n))
+                    continue
+            except Exception:
+                pass
+
+        energy_file = p_dir / "energy.dat"
+        if energy_file.exists():
+            try:
+                from pdb_wizard.energy import read_energy_dat
+                data = read_energy_dat(str(energy_file))
+                if "N" in data and len(data["N"]) > 0:
+                    n_vals = data["N"]
+                    start = len(n_vals) * 3 // 4
+                    avg_n = float(n_vals[start:].mean())
+                    results.append((pressure, avg_n))
+            except Exception:
+                pass
+
+    results.sort(key=lambda x: x[0])
+    return results

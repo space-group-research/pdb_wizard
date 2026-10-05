@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+.coverage
+.pytest_cache/
+moltui/
+space-group-environment/
+
+# Local tooling state
+.claude/
+
+# Simulation inputs/outputs and the MPMC source checkout kept next to the code
+simulations/
+mpmc/
+isotherm/
+cell_opt/
+NVT/
+
+# Files written by pdb_wizard itself while experimenting
+*_out.pdb
+*_out.xyz
+Ni-MOF-74_out_mpmc.pdb
+*.png

@@ -1,0 +1,55 @@
+[project]
+name = "pdb-wizard"
+version = "0.5.0"
+description = "Molecular structure processor and interactive 3D terminal viewer"
+readme = {text = "", content-type = "text/plain"}
+license = "GPL-3.0-or-later"
+requires-python = ">=3.7"
+authors = [
+    { name = "Adam Hogan" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Environment :: Console",
+]
+dependencies = [
+    "numpy>=1.21; python_version < '3.8'",
+    "numpy>=1.24; python_version >= '3.8' and python_version < '3.9'",
+    "numpy>=1.26; python_version >= '3.9'",
+    "typing_extensions; python_version < '3.8'",
+]
+
+[project.optional-dependencies]
+viewer = ["textual>=3.0"]
+test = ["pytest>=7.0", "pytest-cov"]
+
+[project.scripts]
+pdb_wizard = "pdb_wizard.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+sources = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py37"
+extend-exclude = ["src/pdb_wizard/templates"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
