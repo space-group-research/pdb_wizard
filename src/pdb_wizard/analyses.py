@@ -19,6 +19,7 @@ from pdb_wizard.density3d import compute_density_3d
 from pdb_wizard.density_profile import compute_density_profile, compute_density_profile_trajectory
 from pdb_wizard.gyration import compute_gyration_trajectory
 from pdb_wizard.hbonds import count_hbonds_trajectory, detect_hbonds
+from pdb_wizard.io import is_fallback_cell
 from pdb_wizard.isotherm import parse_isotherm_results
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.msd import compute_diffusion_constant, compute_msd
@@ -62,6 +63,12 @@ class AnalysisResult:
         return self.csv_data if self.csv_data is not None else (self.x, self.y)
 
 
+def _has_cell(mol: Molecule) -> bool:
+    """A real periodic cell: not missing, and not the 10^6 Å stand-in the trajectory
+    readers give files without one (densities and g(r) against that are meaningless)."""
+    return mol.pbc is not None and not is_fallback_cell(mol.pbc)
+
+
 def _opt(value: Optional[str]) -> Optional[str]:
     """'(all)' and '' mean no filter."""
     return None if value in (None, "", ALL_ATOMS) else value
@@ -92,26 +99,34 @@ def names_of(mol: Molecule, element: Optional[str] = None) -> List[str]:
 def unavailable(key: str, mol: Optional[Molecule], frames: Optional[list]) -> Optional[str]:
     """Why an analysis cannot run on this structure (None if it can).
 
-    Same rules and messages as the terminal viewer's Analysis menu.
+    The terminal viewer's Analysis-menu rules and messages, plus one more: void volume
+    needs a cell (the terminal viewer reports zeros without one).
     """
     n_frames = len(frames) if frames else 0
     if key in ("energy_plot", "isotherm_plot", "db_search"):
         return None
-    if mol is None or not mol.atoms:
-        return "No atoms loaded"
     if key in ("msd", "rmsd") and n_frames < 3:
         return f"Need a trajectory with 3+ frames for {key.upper()}"
     if key == "gyration" and n_frames < 2:
         return "Need a trajectory for Rg"
-    if key == "pxrd" and mol.pbc is None:
-        return "Need a crystal structure with PBC for PXRD"
     if key == "density3d":
         if n_frames < 2:
             return "Need a trajectory with PBC for 3D density"
-        if mol.pbc is None:
+        if mol is None or not _has_cell(mol):
             return "Need PBC for 3D density map"
-    if key in ("void_vol", "surface_area", "pore_size") and mol.pbc is None:
-        return "Needs a periodic cell"
+    if key == "pxrd" and (mol is None or not mol.atoms or not _has_cell(mol)):
+        return "Need a crystal structure with PBC for PXRD"
+    if mol is None:
+        return "No atoms loaded"
+    if key in ("info", "input_generator"):
+        return None
+    if not mol.atoms:
+        return "No atoms loaded yet" if key == "rdf" else "No atoms loaded"
+    if not _has_cell(mol):
+        need = {"surface_area": "Need PBC for surface area", "pore_size": "Need PBC for pore size",
+                "void_vol": "Need PBC for void volume"}
+        if key in need:
+            return need[key]
     return None
 
 
@@ -195,7 +210,7 @@ def charge_report(mol: Molecule) -> str:
 
 def run_pore_size(mol: Molecule, n_samples: int = 50000, n_bins: int = 50,
                   max_pore: float = 20.0) -> AnalysisResult:
-    if mol.pbc is None:
+    if not _has_cell(mol):
         return AnalysisResult(summary="No PBC for pore size calculation")
     bins, hist = pore_size_distribution(mol, n_samples, n_bins, max_pore)
     peak = bins[hist.argmax()] if hist.max() > 0 else 0
@@ -204,13 +219,29 @@ def run_pore_size(mol: Molecule, n_samples: int = 50000, n_bins: int = 50,
                           "pore_diameter_A,fraction", y_max=_grow(hist))
 
 
+def _empty_window(frames: Optional[list], start: int,
+                  end: Optional[int]) -> Optional[AnalysisResult]:
+    """A result explaining an empty Start/End window (e.g. Start after End), else None."""
+    if frames and len(frames) > 1 and not frame_slice(frames, start, end):
+        last = len(frames) if end is None else end
+        return AnalysisResult(summary=f"No frames between {start} and {last} "
+                                      f"(the trajectory has {len(frames)})")
+    return None
+
+
 def run_rdf(mol: Molecule, el1: str, el2: str, name1: str = ALL_ATOMS, name2: str = ALL_ATOMS,
             r_max: float = 13.0, n_bins: int = 100, frames: Optional[list] = None,
             start: int = 1, end: Optional[int] = None, use_traj: bool = True,
             progress: Optional[Callable[[float], None]] = None) -> AnalysisResult:
     n1, n2 = _opt(name1), _opt(name2)
     label1, label2 = n1 or el1, n2 or el2
-    if use_traj and frames and len(frames) > 1:
+    traj = use_traj and frames and len(frames) > 1
+    if not _has_cell(frames[0] if traj else mol):
+        return AnalysisResult(summary="RDF needs a periodic cell")
+    if traj:
+        empty = _empty_window(frames, start, end)
+        if empty:
+            return empty
         sub = frame_slice(frames, start, end)
         r, g = compute_rdf_trajectory(sub, el1, el2, n_bins, r_max, progress, name1=n1, name2=n2)
         first = max(start, 1)
@@ -228,6 +259,9 @@ def run_coordination(mol: Molecule, center: str, neighbor: str, r_max: float = 5
                      frames: Optional[list] = None, start: int = 1, end: Optional[int] = None,
                      use_traj: bool = False) -> AnalysisResult:
     if use_traj and frames and len(frames) > 1:
+        empty = _empty_window(frames, start, end)
+        if empty:
+            return empty
         r, cn, avg = compute_coordination_trajectory(frame_slice(frames, start, end), center,
                                                      neighbor, r_max)
     else:
@@ -242,12 +276,17 @@ def run_coordination(mol: Molecule, center: str, neighbor: str, r_max: float = 5
 def run_hbonds(mol: Molecule, cutoff: float = 3.5, angle: float = 120.0,
                frames: Optional[list] = None, start: int = 1,
                end: Optional[int] = None) -> AnalysisResult:
+    """H-bonds per frame; x is the frame number (1-based, counted in the whole trajectory)."""
     if frames and len(frames) > 1:
+        empty = _empty_window(frames, start, end)
+        if empty:
+            return empty
         idx, counts = count_hbonds_trajectory(frame_slice(frames, start, end), cutoff, angle)
+        idx = idx + max(start, 1)
         text = ""
     else:
         hb = detect_hbonds(mol, cutoff, angle)
-        idx, counts = np.array([0.0]), np.array([float(len(hb))])
+        idx, counts = np.array([1.0]), np.array([float(len(hb))])
         text = "\n".join(["donor      H  acceptor   D...A (A)   angle (deg)"] + [
             f"{d + 1:>5} {h + 1:>6} {a + 1:>9}   {dist:9.3f}   {ang:11.1f}"
             for d, h, a, dist, ang in hb])
@@ -262,6 +301,9 @@ def run_hbonds(mol: Molecule, cutoff: float = 3.5, angle: float = 120.0,
 def run_msd(frames: list, element: str, name: str = ALL_ATOMS, dt: float = 1.0, start: int = 1,
             end: Optional[int] = None) -> AnalysisResult:
     nm = _opt(name)
+    empty = _empty_window(frames, start, end)
+    if empty:
+        return empty
     lags, msd = compute_msd(frame_slice(frames, start, end), element=element, name=nm)
     if len(lags) == 0:
         return AnalysisResult(summary=f"No {element} atoms found")
@@ -278,25 +320,32 @@ def run_msd(frames: list, element: str, name: str = ALL_ATOMS, dt: float = 1.0, 
 def run_rmsd(frames: list, element: str = ALL_ATOMS, name: str = ALL_ATOMS, dt: float = 1.0,
              start: int = 1, end: Optional[int] = None) -> AnalysisResult:
     el, nm = _opt(element), _opt(name)
+    empty = _empty_window(frames, start, end)
+    if empty:
+        return empty
     idx, vals = compute_rmsd(frame_slice(frames, start, end), element=el, name=nm)
     if len(idx) == 0:
         return AnalysisResult(summary="No matching atoms found")
     avg = float(vals[len(vals) // 2:].mean())
     return AnalysisResult(idx * dt, vals, f"RMSD ({el or 'all'})", "time (ps)",
                           f"RMSD avg (2nd half) = {avg:.3f} A  |  max = {vals.max():.3f} A",
-                          "frame,rmsd_A", y_max=_grow(vals), csv_data=(idx, vals))
+                          "frame,rmsd_A", y_max=_grow(vals),
+                          csv_data=(idx + max(start, 1), vals))  # whole-trajectory frame numbers
 
 
 def run_gyration(frames: list, element: str = ALL_ATOMS, dt: float = 1.0, start: int = 1,
                  end: Optional[int] = None) -> AnalysisResult:
     el = _opt(element)
+    empty = _empty_window(frames, start, end)
+    if empty:
+        return empty
     idx, rg = compute_gyration_trajectory(frame_slice(frames, start, end), el)
     if len(idx) == 0:
         return AnalysisResult(summary="No data")
     return AnalysisResult(idx * dt, rg, f"Rg ({el or 'all'})", "time (ps)",
                           f"Avg Rg = {rg.mean():.3f} A  |  std = {rg.std():.3f} A", "frame,rg_A",
                           y_min=float(rg.min()) * 0.9 if rg.min() > 0 else 0.0, y_max=_grow(rg),
-                          csv_data=(idx, rg))
+                          csv_data=(idx + max(start, 1), rg))
 
 
 def run_density_profile(mol: Molecule, element: str, name: str = ALL_ATOMS, axis: int = 2,
@@ -305,7 +354,13 @@ def run_density_profile(mol: Molecule, element: str, name: str = ALL_ATOMS, axis
                         n_bins: int = 100) -> AnalysisResult:
     nm = _opt(name)
     axis_label = "abc"[axis]
-    if use_traj and frames and len(frames) > 1:
+    traj = use_traj and frames and len(frames) > 1
+    if not _has_cell(frames[0] if traj else mol):
+        return AnalysisResult(summary="A density profile needs a periodic cell")
+    if traj:
+        empty = _empty_window(frames, start, end)
+        if empty:
+            return empty
         sub = frame_slice(frames, start, end)
         pos, dens = compute_density_profile_trajectory(sub, axis, n_bins, element, nm)
         title = f"Density {element} ({axis_label}-axis, {len(sub)} frames)"
@@ -336,19 +391,25 @@ def run_pxrd(mol: Molecule, wavelength: float = 1.5406, two_theta_max: float = 5
 def read_experimental_pxrd(path: str) -> tuple:
     """Two-column (2-theta, intensity) pattern, scaled to a maximum of 100.
 
-    Whitespace-separated (.xy, .dat) or comma-separated, with or without a header line.
+    Columns may be separated by commas, semicolons, tabs or spaces. '#' comments, blank
+    lines and text header lines are skipped; extra columns are ignored.
     """
-    try:
-        data = np.loadtxt(path, comments="#")
-    except ValueError:
-        data = None
-    if data is None or data.ndim == 1:
-        try:
-            data = np.loadtxt(path, delimiter=",", comments="#")
-        except ValueError:
-            data = np.loadtxt(path, delimiter=",", comments="#", skiprows=1)
-    if data.ndim != 2 or data.shape[1] < 2:
+    rows = []
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            fields = [f for f in line.replace(",", " ").replace(";", " ").split() if f]
+            try:
+                values = [float(f) for f in fields[:2]]
+            except ValueError:
+                continue  # a header line
+            if len(values) == 2:
+                rows.append(values)
+    if not rows:
         raise ValueError("need 2 columns (2theta, intensity)")
+    data = np.array(rows)
     tt, inten = data[:, 0], data[:, 1]
     if inten.max() > 0:
         inten = inten / inten.max() * 100
@@ -415,14 +476,20 @@ def run_energy(data: Dict, column: str, start: int = 1,
     values = data[column][sl]
     if len(values) == 0:
         return AnalysisResult(summary="Empty step range")
-    y_min = float(values.min()) * (0.9 if values.min() > 0 else 1.1)
-    y_max = float(values.max()) * 1.1 if values.max() > 0 else float(values.max()) * 0.9
+    finite = values[np.isfinite(values)]
+    if not len(finite):
+        return AnalysisResult(summary=f"{column}: no finite values in steps "
+                                      f"{sl.start + 1}-{sl.stop}")
+    lo, hi = float(finite.min()), float(finite.max())
+    y_min = lo * (0.9 if lo > 0 else 1.1)
+    y_max = hi * 1.1 if hi > 0 else hi * 0.9
     if y_min == y_max:
         y_max = y_min + 1
     title = column
     if sl.start != 0 or sl.stop != energy_n_steps(data):
         title = f"{column} (steps {sl.start + 1}-{sl.stop})"
-    avg = float(values[-len(values) // 4:].mean()) if len(values) > 4 else float(values.mean())
+    tail = values[-len(values) // 4:] if len(values) > 4 else values
+    avg = float(np.nanmean(tail)) if np.isfinite(tail).any() else float("nan")
     return AnalysisResult(steps, values, title, "step",
                           f"{column} [{sl.start + 1}-{sl.stop}]: "
                           f"last-quarter avg = {avg:.4f}, final = {values[-1]:.4f}",

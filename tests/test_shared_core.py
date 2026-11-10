@@ -103,8 +103,13 @@ def test_unavailable_messages_match_the_terminal_viewer():
     nopbc = Molecule(atoms=list(mol.atoms))
     assert analyses.unavailable("density3d", nopbc, frames) == "Need PBC for 3D density map"
     assert analyses.unavailable("pxrd", nopbc, None).startswith("Need a crystal")
-    assert analyses.unavailable("void_vol", nopbc, None) == "Needs a periodic cell"
-    assert analyses.unavailable("rdf", Molecule(atoms=[]), None) == "No atoms loaded"
+    assert analyses.unavailable("void_vol", nopbc, None) == "Need PBC for void volume"
+    assert analyses.unavailable("surface_area", nopbc, None) == "Need PBC for surface area"
+    assert analyses.unavailable("pore_size", nopbc, None) == "Need PBC for pore size"
+    assert analyses.unavailable("rdf", Molecule(atoms=[]), None) == "No atoms loaded yet"
+    assert analyses.unavailable("hbonds", Molecule(atoms=[]), None) == "No atoms loaded"
+    assert analyses.unavailable("info", Molecule(atoms=[]), None) is None
+    assert analyses.unavailable("pxrd", Molecule(atoms=[]), None).startswith("Need a crystal")
     assert analyses.unavailable("energy_plot", None, None) is None
 
 
@@ -124,7 +129,7 @@ def test_runs_report_missing_data():
     assert long.summary.startswith("D = ") and long.extra["D"] > 0
     np.testing.assert_array_equal(long.x, long.csv_arrays()[0] * 2.0)
     hb = analyses.run_hbonds(mol)
-    assert hb.x.tolist() == [0.0] and hb.text.startswith("donor")
+    assert hb.x.tolist() == [1.0] and hb.text.startswith("donor")  # frame numbers are 1-based
     rg = analyses.run_gyration(frames, "O", dt=0.5, start=2, end=4)
     assert len(rg.x) == 3 and rg.csv_header == "frame,rg_A"
 
@@ -203,7 +208,7 @@ def test_parse_form_value():
     var = {v.name: v for v in ENGINES["mpmc_isotherm"].user_vars}
     assert inputgen.parse_form_value(var["pressures"], "0.1, 1,5") == [0.1, 1.0, 5.0]
     assert inputgen.parse_form_value(var["temperature"], " 77 ") == 77.0
-    assert inputgen.parse_form_value(var["numsteps"], 5) == 5
+    assert inputgen.parse_form_value(var["numsteps"], 5000) == 5000
     assert inputgen.parse_form_value(var["sorbate"], "h2_bss") == "h2_bss"
     for name, raw in (("pressures", " , "), ("temperature", "  ")):
         with pytest.raises(ValueError, match="is empty"):

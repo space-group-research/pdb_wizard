@@ -99,3 +99,21 @@ def test_pack_cancel_bad_count_and_bad_template(tmp_path):
     results = [asyncio.run(_run(steps)) for steps in runs]
     assert [r[0] for r in results] == [624] * 4
     assert results[2][2] == "InputModal"  # an invalid count asks again
+
+
+def test_pack_count_with_a_superscript_digit_asks_again():
+    """'²'.isdigit() is True, but int('²') raised inside the callback."""
+    n, _, screen, _ = asyncio.run(_run([(SorbateModal, "h2o_tip3p"), (InputModal, "²")]))
+    assert n == 624 and screen == "InputModal"
+
+
+def test_pack_after_a_supercell_uses_fresh_molecule_ids():
+    from pdb_wizard.operations import extend_axis
+
+    mol = read_file(str(ROOT / "HKUST-1_out_mpmc.pdb"))
+    mol = extend_axis(mol, 0, 1) or mol  # movable ids 2 and 4
+    n, movable, _, _ = asyncio.run(_run([(SorbateModal, "h2o_tip3p"), (InputModal, "2")], mol))
+    sizes: dict = {}
+    for a in movable:
+        sizes[a.mpmc_mol] = sizes.get(a.mpmc_mol, 0) + 1
+    assert sorted(sizes) == [2, 4, 5, 6] and all(v == 3 for v in sizes.values())

@@ -67,7 +67,9 @@ from pdb_wizard.gui_tools import (
 from pdb_wizard.io import (
     _is_mpmc_dummy_site,
     assign_framework_charges,
+    is_fallback_cell,
     mpmc_movable_count,
+    next_mpmc_mol_id,
     read_charges_file,
     read_file,
     write_mpmc_pdb,
@@ -157,7 +159,7 @@ def _rotation(axis: int, angle: float) -> np.ndarray:
 
 
 def _mix(a: "QtGui.QColor", b: "QtGui.QColor", t: float) -> "QtGui.QColor":
-    t = float(np.clip(t, 0.0, 1.0))
+    t = float(np.clip(t, 0.0, 1.0)) if np.isfinite(t) else 0.0
     return QtGui.QColor(int(a.red() * (1 - t) + b.red() * t),
                         int(a.green() * (1 - t) + b.green() * t),
                         int(a.blue() * (1 - t) + b.blue() * t))
@@ -258,8 +260,11 @@ class StructureView(_QWidget):
         self.selected = None
         self.picked = []
         self.highlighted = set()
+        n = len(mol.atoms) if mol is not None else 0
         if reset_view:
             self.measurements = []
+        else:  # frames of one trajectory: keep pins whose atoms still exist
+            self.measurements = [m for m in self.measurements if all(i < n for i in m[0])]
         self.refresh_bonds(redetect)
         if reset_view:
             self.reset_view()
@@ -283,6 +288,12 @@ class StructureView(_QWidget):
         self._cache = {}
         self.update()
 
+    def has_cell(self) -> bool:
+        """A real cell to draw. Trajectories without one get a 10^6 Å stand-in box from
+        the reader; drawing or fitting the view to that would shrink the atoms to a dot."""
+        return (self.mol is not None and self.mol.pbc is not None
+                and not is_fallback_cell(self.mol.pbc))
+
     def cell_corners(self) -> np.ndarray:
         """Cell corners around the atoms: the box is placed in whichever periodic image
         the structure is stored (0..1, -1/2..1/2, ...), snapped to half cells."""
@@ -299,7 +310,7 @@ class StructureView(_QWidget):
         if mol is None or not mol.atoms:
             return
         pts = np.array([a.x for a in mol.atoms])
-        if mol.pbc is not None:
+        if self.has_cell():
             corners = self.cell_corners()
             self._center = corners.mean(axis=0)
             pts = np.vstack([corners, pts])
@@ -467,6 +478,12 @@ class StructureView(_QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
         painter = QtGui.QPainter(self)
+        try:  # an exception with the painter still active crashes Qt on the next paint
+            self._paint(painter)
+        finally:
+            painter.end()
+
+    def _paint(self, painter) -> None:
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         bg = self._background()
         grad = QtGui.QRadialGradient(self.width() / 2, self.height() / 2,
@@ -496,7 +513,7 @@ class StructureView(_QWidget):
         span = max(zmax - zmin, 1e-6)
         colors = self.atom_colors()
 
-        if self.show_cell and mol.pbc is not None:
+        if self.show_cell and self.has_cell():
             self._paint_cell(painter, mol)
         if self.density is not None and self.show_density:
             self._paint_density(painter)
@@ -636,9 +653,10 @@ class StructureView(_QWidget):
         if not self.measurements:
             return
         accent = QtGui.QColor(255, 210, 60)
-        for idx, label in self.measurements:
+        for idx, _ in self.measurements:
             if any(i >= len(mol.atoms) for i in idx):
                 continue
+            label = f"{self.distance(*idx):.3f} Å" if len(idx) == 2 else ""
             pts = [QtCore.QPointF(*screen[i]) for i in idx]
             painter.setPen(QtGui.QPen(accent, 1.5, QtCore.Qt.DashLine))
             for a, b in zip(pts, pts[1:]):
@@ -648,7 +666,7 @@ class StructureView(_QWidget):
             painter.drawText(mid + QtCore.QPointF(6, -6), label)
 
     def _paint_axes(self, painter, mol) -> None:
-        if mol.pbc is None:
+        if not self.has_cell():
             return
         origin = QtCore.QPointF(42, self.height() - 42)
         colors = [QtGui.QColor(230, 80, 80), QtGui.QColor(90, 190, 90), QtGui.QColor(90, 140, 240)]
@@ -676,9 +694,21 @@ class StructureView(_QWidget):
         cos_a = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
         return float(np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0))))
 
+    def clear_marks(self) -> None:
+        """Forget selection, picks, highlights and pinned measurements (after an edit the
+        indices may point at other atoms, or past the end)."""
+        self.selected = None
+        self.picked = []
+        self.highlighted = set()
+        self.measurements = []
+
     def pick(self, idx: int, shift: bool = False) -> str:
         """Measure-mode / shift-click picking, as in the terminal viewer. Returns the
         message to show."""
+        n = len(self.mol.atoms) if self.mol is not None else 0
+        self.picked = [i for i in self.picked if i < n]
+        if not 0 <= idx < n:
+            return ""
         a = self.mol.atoms[idx]
         if self.measure_mode:
             if idx not in self.picked:
@@ -804,6 +834,31 @@ class StructureView(_QWidget):
         super().resizeEvent(event)
 
 
+def _qt_alive(obj) -> bool:
+    """False once Qt has deleted the C++ side of a widget (closed with WA_DeleteOnClose)."""
+    try:
+        obj.isVisible()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _cell_problem(a: float, b: float, c: float, alpha: float, beta: float,
+                  gamma: float) -> Optional[str]:
+    """Why these cell parameters are unusable, or None."""
+    values = (a, b, c, alpha, beta, gamma)
+    if not all(np.isfinite(v) for v in values):
+        return "Cell parameters must be finite numbers"
+    if min(a, b, c) <= 0:
+        return "Cell lengths must be positive"
+    if not all(0 < x < 180 for x in (alpha, beta, gamma)):
+        return "Cell angles must be between 0 and 180 degrees"
+    ca, cb, cg = (np.cos(np.radians(x)) for x in (alpha, beta, gamma))
+    if 1 - ca * ca - cb * cb - cg * cg + 2 * ca * cb * cg <= 1e-10:
+        return "These angles do not make a cell (zero or negative volume)"
+    return None
+
+
 def _convex_hull(pts: np.ndarray) -> list:
     """Screen-space convex hull (monotone chain) as QPointFs, for polyhedron shading."""
     p = sorted(map(tuple, np.asarray(pts, float)))
@@ -890,6 +945,7 @@ class GuiDocument:
         self.view_state: Optional[tuple] = None
         self.density: Optional[tuple] = None
         self.measurements: list = []
+        self.loading = False  # a trajectory is still being read into this tab
 
     @property
     def empty(self) -> bool:
@@ -1312,7 +1368,7 @@ class MainWindow(_QMainWindow):
                 name: str = "", frames: Optional[list] = None) -> GuiDocument:
         """Open ``mol`` in a tab: the current one if it is empty, else a new one."""
         d = GuiDocument(mol, path, frames, name)
-        if self.doc.empty and self.load_task_doc() is not self.doc:
+        if self.doc.empty and not self.doc.loading:
             self.docs[self.doc_index] = d
             self.tab_bar.setTabText(self.doc_index, d.name)
             self._show_doc()
@@ -1322,10 +1378,6 @@ class MainWindow(_QMainWindow):
             self.tab_bar.addTab(d.name)
             self.tab_bar.setCurrentIndex(len(self.docs) - 1)  # -> _switch_doc
         return d
-
-    def load_task_doc(self) -> Optional[GuiDocument]:
-        return getattr(self, "_loading_doc", None) if self.load_task and not \
-            self.load_task.finished else None
 
     def _show_doc(self) -> None:
         d = self.doc
@@ -1340,8 +1392,10 @@ class MainWindow(_QMainWindow):
         if not 0 <= index < len(self.docs):
             return
         self.frame_bar.stop(notify=False)
+        self._close_windows_of(self.docs[index])
         if len(self.docs) == 1:
             self.docs[0] = GuiDocument()
+            self.tab_bar.setTabText(0, "untitled")
             self._show_doc()
             return
         current = self.doc_index
@@ -1371,16 +1425,22 @@ class MainWindow(_QMainWindow):
         self.geometry.set_molecule(self.mol)
         self._refresh_info()
         self._update_title()
+        for d in self._live_windows():  # tool windows work on their tab's current atoms
+            if getattr(d, "doc", None) is self.doc and hasattr(d, "set_structure"):
+                d.set_structure(self.doc.mol, self.doc.frames)
 
     def _changed(self, message: str) -> None:
         """After an edit: redraw everything and say what happened."""
+        self.view.clear_marks()
+        self._selected(None)
         self.view.refresh_bonds()
         self.view.update()
         self._refresh_panels()
         self.statusBar().showMessage(message, 8000)
 
     def _checkpoint(self) -> None:
-        self._undo.append(copy.deepcopy(self.mol))
+        # remember which frame was edited: undo must restore that frame, not the shown one
+        self._undo.append((self.doc.frame_idx, copy.deepcopy(self.mol)))
         del self._undo[:-20]
         self.undo_action.setEnabled(True)
 
@@ -1392,7 +1452,13 @@ class MainWindow(_QMainWindow):
     def undo(self) -> None:
         if not self._undo:
             return
-        self.set_molecule(self._undo.pop(), reset_view=False)
+        frame, mol = self._undo.pop()
+        if self.frames and frame < len(self.frames):
+            self.frame_bar.stop(notify=False)
+            self.doc.frame_idx = frame
+            self.frame_bar.set_count(len(self.frames), frame)
+        self.set_molecule(mol, reset_view=False)
+        self.view.clear_marks()
         self.undo_action.setEnabled(bool(self._undo))
         self.statusBar().showMessage("Undone", 4000)
 
@@ -1538,13 +1604,24 @@ class MainWindow(_QMainWindow):
     def _warn(self, text: str) -> None:
         QtWidgets.QMessageBox.warning(self, "PDB Wizard", text)
 
-    def _show_window(self, dialog) -> object:
-        """Show a tool window without blocking and keep it alive."""
-        self.dialogs = [d for d in self.dialogs if d.isVisible()]
+    def _live_windows(self) -> list:
+        self.dialogs = [d for d in self.dialogs if _qt_alive(d)]
+        return list(self.dialogs)
+
+    def _show_window(self, dialog, doc: Optional[GuiDocument] = None) -> object:
+        """Show a tool window without blocking. It is freed when closed; ``doc`` ties it to
+        a tab (it follows that tab's edits and closes with it)."""
+        self._live_windows()
+        dialog.doc = doc
         self.dialogs.append(dialog)
-        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         dialog.show()
         return dialog
+
+    def _close_windows_of(self, doc: GuiDocument) -> None:
+        for d in self._live_windows():
+            if getattr(d, "doc", None) is doc:
+                d.close()
 
     def report(self, title: str, text: str) -> object:
         return self._show_window(TextReport(title, text, self))
@@ -1566,6 +1643,10 @@ class MainWindow(_QMainWindow):
 
         self.task = GuiTask(fn, finish, failed)
         return self.task
+
+    def _snapshot(self) -> Optional[Molecule]:
+        """A copy of the shown structure for background work (edits may change the live one)."""
+        return copy.deepcopy(self.mol) if self.mol is not None else None
 
     # ---- files --------------------------------------------------------------------------
 
@@ -1601,7 +1682,7 @@ class MainWindow(_QMainWindow):
 
     def _open_trajectory(self, path: str) -> bool:
         d = self.new_tab(Molecule(atoms=[]), path, name=f"{Path(path).name} (loading)")
-        self._loading_doc = d
+        d.loading = True
         progress = [0.0]
 
         def read():
@@ -1610,22 +1691,29 @@ class MainWindow(_QMainWindow):
                 frames[0].detect_bonds()
             return frames
 
-        def done(frames):
+        def finished() -> bool:
             timer.stop()
+            d.loading = False
+            self.statusBar().clearMessage()
+            return d in self.docs  # False if its tab was closed meanwhile
+
+        def done(frames):
+            if not finished():
+                return
             d.frames, d.frame_idx = frames, 0
             d.mol = frames[0] if frames else Molecule(atoms=[])
             d.name = Path(path).name
+            d.view_state = None  # fit the camera to the frames, not the empty placeholder
             if d is self.doc:
                 self._show_doc()
-            else:
-                self.tab_bar.setTabText(self.docs.index(d), d.name)
+            self.tab_bar.setTabText(self.docs.index(d), d.name)
             self.statusBar().showMessage(f"Loaded {len(frames)} frames", 6000)
             for note in trajectory_caveats(frames):
                 self._warn(note)
 
         def failed(e):
-            timer.stop()
-            self.statusBar().clearMessage()
+            if finished():
+                self.close_tab(self.docs.index(d))  # no empty "(loading)" tab left behind
             self._warn(f"Could not read {Path(path).name}:\n{e}")
 
         timer = QtCore.QTimer(self)
@@ -1689,7 +1777,9 @@ class MainWindow(_QMainWindow):
                                                             "PNG (*.png)")
         if not path:
             return None
-        self.view.grab().save(path)
+        if not self.view.grab().save(path):
+            self._warn(f"Could not write {path} (check the folder and the extension)")
+            return None
         self.statusBar().showMessage(f"Saved image {path}", 6000)
         return path
 
@@ -1708,6 +1798,7 @@ class MainWindow(_QMainWindow):
                                                             "GIF (*.gif)")
         if not path:
             return None
+        n_frames = max(1, int(n_frames))
         base = self.view._rot.copy()
         images = []
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
@@ -1722,7 +1813,11 @@ class MainWindow(_QMainWindow):
             self.view._rot = base
             self.view.update()
             QtWidgets.QApplication.restoreOverrideCursor()
-        images[0].save(path, save_all=True, append_images=images[1:], duration=80, loop=0)
+        try:
+            images[0].save(path, save_all=True, append_images=images[1:], duration=80, loop=0)
+        except (OSError, ValueError) as e:
+            self._warn(f"Could not write {path}:\n{e}")
+            return None
         self.statusBar().showMessage(f"Saved {path} ({n_frames} frames)", 6000)
         return path
 
@@ -1735,6 +1830,9 @@ class MainWindow(_QMainWindow):
             self.open_path(url.toLocalFile())
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.frame_bar.stop(notify=False)
+        for d in self._live_windows():
+            d.close()
         if self._db_cache and os.path.isdir(self._db_cache):
             shutil.rmtree(self._db_cache, ignore_errors=True)
         super().closeEvent(event)
@@ -1832,6 +1930,10 @@ class MainWindow(_QMainWindow):
             self._changed("PBC removed")
             return True
         a, b, c, alpha, beta, gamma = (float(v) for v in values)
+        problem = _cell_problem(a, b, c, alpha, beta, gamma)
+        if problem:
+            self._warn(problem)
+            return False
         self._checkpoint()
         if self.mol.pbc is not None:
             self.mol.pbc.update(a, b, c, alpha, beta, gamma)
@@ -1893,6 +1995,9 @@ class MainWindow(_QMainWindow):
     def edit_coord(self, idx: int, xyz: tuple) -> None:
         if self.mol is None or not 0 <= idx < len(self.mol.atoms):
             return
+        if len(xyz) != 3 or not np.all(np.isfinite(xyz)):
+            self._warn("Coordinates must be three finite numbers")
+            return
         self._checkpoint()
         self.mol.atoms[idx].x = np.array(xyz, dtype=float)
         self._changed(f"Updated atom {idx + 1} position")
@@ -1924,7 +2029,7 @@ class MainWindow(_QMainWindow):
             self._warn("No room for even one molecule with these settings.")
             return 0
         self._checkpoint()
-        first_id = 2 + mpmc_movable_count(self.mol)
+        first_id = next_mpmc_mol_id(self.mol)
         self.mol.atoms.extend(sorbate_atoms(model, placed, first_id))
         full = "" if n is None or len(placed) == n else f" (asked for {n}; the cell is full)"
         self._changed(f"Packed {len(placed)} {model.label}{full}. Save as .pqr for MPMC.")
@@ -1988,9 +2093,11 @@ class MainWindow(_QMainWindow):
             self.statusBar().showMessage(why, 6000)
             self._warn(why)
             return None
-        mol, frames = self.mol, self.frames
+        mol, frames, doc = self.mol, self.frames, self.doc
         if key == "info":
             return self.report("System Info", system_info_text(mol, self.path or ""))
+        if key in ("void_vol", "surface_area"):
+            mol = self._snapshot()
         if key == "void_vol":
             return self._busy("Calculating void volume (100k samples)...",
                               lambda: void_volume_text(mol),
@@ -2004,13 +2111,13 @@ class MainWindow(_QMainWindow):
         if key == "energy_plot":
             return self.energy_plot()
         if key == "input_generator":
-            return self._show_window(InputGeneratorDialog(mol, self.path or "", self))
+            return self._show_window(InputGeneratorDialog(mol, self.path or "", self), doc)
         if key == "db_search":
             if self._db_cache is None:
                 self._db_cache = tempfile.mkdtemp(prefix="pdb_wizard_db_")
             return self._show_window(DatabaseDialog(self._db_cache, self._open_fetched, self))
         dialog = AnalysisDialog(key, mol, frames, self)
-        self._show_window(dialog)
+        self._show_window(dialog, doc if key != "isotherm_plot" else None)
         if not dialog.spec.fields:  # nothing to choose: compute straight away
             dialog.run()
         return dialog
@@ -2047,13 +2154,23 @@ class MainWindow(_QMainWindow):
                                                          items, 0, False)
             if not ok:
                 return None
-        frames = self.frames
+        doc = self.doc
+        frames = list(self.frames)
+        current = next((k for k, f in enumerate(frames) if f is self.mol), -1)
+        if current >= 0:  # the shown frame may be edited meanwhile; the rest cannot
+            frames[current] = self._snapshot()
 
         def done(res):
             if "positions" not in res.extra:  # no atoms of that element
                 self.statusBar().showMessage(res.summary, 6000)
                 return
-            self.set_density(res.extra["positions"], res.extra["values"])
+            if doc not in self.docs:
+                return
+            doc.density = (np.asarray(res.extra["positions"]),
+                           np.asarray(res.extra["values"], float))
+            if doc is self.doc:  # the map belongs to the tab it was computed for
+                self.view.set_density(*doc.density)
+                self.density_action.setEnabled(True)
             self.statusBar().showMessage(f"{res.summary} (View > Show 3D density)", 8000)
 
         return self._busy(f"Computing 3D density for {element}...",

@@ -51,7 +51,7 @@ def window(qtbot):
     w.show()
     qtbot.waitExposed(w)
     yield w
-    for d in w.dialogs:
+    for d in w._live_windows():
         d.close()
 
 
@@ -161,7 +161,7 @@ def test_trajectory_loads_with_frame_bar(traj):
 def test_play_and_speed(traj, qtbot):
     bar = traj.frame_bar
     bar.set_speed(4)
-    assert bar.speed_label.text() == "4.0x" and bar.timer.interval() == 25
+    assert bar.speed_label.text() == "4x" and bar.timer.interval() == 25
     bar.set_speed(100)
     assert bar.speed == 16.0
     bar.set_speed(1)

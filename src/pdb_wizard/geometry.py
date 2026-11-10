@@ -46,6 +46,41 @@ def find_overlapping_pairs(
     return pairs
 
 
+def _same_movable_molecule(a: Atom, b: Atom) -> bool:
+    return (a.mpmc_flag == "M" and b.mpmc_flag == "M" and a.mpmc_mol is not None
+            and a.mpmc_mol == b.mpmc_mol)
+
+
+def _pairs_within(mol: Molecule, cutoff: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(i, j, r) for minimum-image pairs i < j closer than ``cutoff``, in (i, j) order.
+
+    Evaluated in row chunks, so memory stays bounded where an all-pairs matrix would take
+    N^2 (gigabytes for a few thousand atoms).
+    """
+    pbc = mol.pbc
+    n = len(mol.atoms)
+    empty = (np.zeros(0, dtype=int), np.zeros(0, dtype=int), np.zeros(0))
+    if pbc is None or n < 2:
+        return empty
+    coords = np.array([a.x for a in mol.atoms], dtype=float)
+    recip, basis = pbc.reciprocal_basis_matrix, pbc.basis_matrix
+    chunk = max(1, _OVERLAP_CHUNK_BUDGET // n)
+    out_i, out_j, out_r = [], [], []
+    for start in range(0, n, chunk):
+        stop = min(start + chunk, n)
+        dx = coords[start:stop, None, :] - coords[None, :, :]
+        wrapped = dx - np.round(dx @ recip) @ basis
+        r = np.linalg.norm(wrapped, axis=2)
+        ii, jj = np.nonzero(r < cutoff)
+        keep = ii + start < jj
+        out_i.append(ii[keep] + start)
+        out_j.append(jj[keep])
+        out_r.append(r[ii[keep], jj[keep]])
+    if not out_i:
+        return empty
+    return np.concatenate(out_i), np.concatenate(out_j), np.concatenate(out_r)
+
+
 def remove_overlapping_atoms(
     mol: Molecule, cutoff: float = OVERLAP_CUTOFF,
 ) -> tuple[Molecule, list[str]]:
@@ -69,6 +104,8 @@ def remove_overlapping_atoms(
     for i, j in pairs:
         if i in removed or j in removed:
             continue
+        if _same_movable_molecule(system[i], system[j]):
+            continue  # sites of one sorbate model (BSS H2 sits 0.04 A apart) are not copies
         removed.add(j)
         a, b = system[i], system[j]
         messages.append(
@@ -93,12 +130,12 @@ def overlap_detector(mol: Molecule) -> Molecule:
 def get_close_contacts(mol: Molecule) -> list[str]:
     if mol.pbc is None:
         return []
-    pbc = mol.pbc
     system = mol.atoms
     set_atom_ids(system)
-    i_idx, j_idx, rs = pbc.get_all_rs_min_image(system)
     vdw_radii = np.array([a.vdw for a in system], dtype=float)
     bond_radii = np.array([a.bond_r for a in system], dtype=float)
+    # a contact is closer than the mean vdW radius, so nothing beyond the largest matters
+    i_idx, j_idx, rs = _pairs_within(mol, float(vdw_radii.max()) if len(system) else 0.0)
     mixed_vdw = 0.5 * (vdw_radii[i_idx] + vdw_radii[j_idx])
     mixed_bond = 0.5 * (bond_radii[i_idx] + bond_radii[j_idx])
     mask = (mixed_vdw > rs) & (rs > mixed_bond)
@@ -202,12 +239,11 @@ def get_angles_list(mol: Molecule) -> list[str]:
 def get_lone_atoms(mol: Molecule) -> list[Atom]:
     if mol.pbc is None:
         return []
-    pbc = mol.pbc
     system = mol.atoms
     set_atom_ids(system)
     n = len(system)
-    i_idx, j_idx, rs = pbc.get_all_rs_min_image(system)
     vdw_radii = np.array([a.vdw for a in system], dtype=float)
+    i_idx, j_idx, rs = _pairs_within(mol, float(vdw_radii.max()) if n else 0.0)
     mixed_vdw = 0.5 * (vdw_radii[i_idx] + vdw_radii[j_idx])
     has_neighbor = np.zeros(n, dtype=bool)
     contact_mask = rs < mixed_vdw

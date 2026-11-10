@@ -454,3 +454,16 @@ def sorbate_atoms(model: SorbateModel, placements, first_mol_id: int) -> list:
             atom.mpmc_res, atom.file_mass = model.label, site.mass
             atoms.append(atom)
     return atoms
+
+
+def parse_sorbate_count(text: str):
+    """'fill' -> None (pack until full), a positive whole number -> that number.
+
+    Anything else raises ValueError (unicode digits such as '²' included).
+    """
+    raw = text.strip().lower()
+    if raw == "fill":
+        return None
+    if raw.isascii() and raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    raise ValueError("Enter a positive number or 'fill'")

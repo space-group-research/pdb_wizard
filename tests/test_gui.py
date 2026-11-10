@@ -39,7 +39,7 @@ def window(qtbot):
     w.show()
     qtbot.waitExposed(w)
     yield w
-    for d in w.dialogs:  # tool and report windows the test opened
+    for d in w._live_windows():  # tool and report windows the test opened
         d.close()
 
 

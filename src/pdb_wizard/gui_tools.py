@@ -9,6 +9,7 @@ same features and produce the same numbers. Like gui.py, this imports without Py
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
@@ -81,27 +82,39 @@ class GuiTask:
     """
 
     _pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    _live: set = set()  # running tasks stay referenced, so a second task never drops the first
 
     def __init__(self, fn: Callable, on_done: Callable, on_error: Callable) -> None:
         self._future = self._pool.submit(fn)
         self._on_done, self._on_error = on_done, on_error
         self.finished = False
+        GuiTask._live.add(self)
         self._timer = QtCore.QTimer()
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._poll)
         self._timer.start()
+
+    def detach(self) -> None:
+        """Drop the callbacks (their window is closing); the work finishes unseen."""
+        self._on_done = self._on_error = lambda *_: None
 
     def _poll(self) -> None:
         if self.finished or not self._future.done():
             return
         self._timer.stop()
         self.finished = True
+        GuiTask._live.discard(self)
         try:
             result = self._future.result()
         except Exception as e:  # reported to the user by on_error
-            self._on_error(e)
+            callback, arg = self._on_error, e
         else:
-            self._on_done(result)
+            callback, arg = self._on_done, result
+        try:
+            callback(arg)
+        except RuntimeError as e:
+            if "already deleted" not in str(e):  # its window was destroyed meanwhile: fine
+                raise
 
     def wait(self, timeout: float = 600.0) -> None:
         concurrent.futures.wait([self._future], timeout=timeout)
@@ -192,7 +205,9 @@ class QtPlot(_QWidgetT):
         x0, x1, _, _ = self.limits()
         c = (x0 + x1) / 2 if center is None else center
         lo, hi = c - (c - x0) / factor, c + (x1 - c) / factor
-        full0, full1 = float(np.nanmin(self.x)), float(np.nanmax(self.x))
+        xs = [self.x] + ([self.overlay[0]] if self.overlay is not None else [])
+        full0 = min(float(np.nanmin(a)) for a in xs if len(a))
+        full1 = max(float(np.nanmax(a)) for a in xs if len(a))
         self.x_range = None if hi - lo >= full1 - full0 else (max(lo, full0), min(hi, full1))
         self.update()
 
@@ -204,6 +219,12 @@ class QtPlot(_QWidgetT):
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
         p = QtGui.QPainter(self)
+        try:  # an exception with the painter still active crashes Qt on the next paint
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _paint(self, p) -> None:
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         pal = self.palette()
         p.fillRect(self.rect(), pal.color(QtGui.QPalette.Base))
@@ -289,7 +310,8 @@ class QtPlot(_QWidgetT):
         if not len(self.x) or not self._frame.contains(pos):
             self._hover = None
         else:
-            self._hover = int(np.argmin(np.abs(self.x - self._x_at(pos))))
+            dist = np.abs(self.x - self._x_at(pos))
+            self._hover = int(np.nanargmin(dist)) if np.isfinite(dist).any() else None
         self.update()
 
     def wheelEvent(self, event) -> None:  # noqa: N802
@@ -420,6 +442,14 @@ ANALYSES: Dict[str, AnalysisSpec] = {
 }
 
 
+def _couple_range(start, end) -> None:
+    """Keep a Start spin box at or below its End box, so a frame range is never empty."""
+    start.valueChanged.connect(end.setMinimum)
+    end.valueChanged.connect(start.setMaximum)
+    end.setMinimum(start.value())
+    start.setMaximum(end.value())
+
+
 class AnalysisDialog(_QDialogT):
     """Options on top, Compute / CSV / Save-plot buttons, the plot and a status line.
 
@@ -431,6 +461,8 @@ class AnalysisDialog(_QDialogT):
         super().__init__(parent)
         spec = ANALYSES[key]
         self.key, self.spec, self.mol, self.frames = key, spec, mol, frames
+        self.doc = None  # the window's document; MainWindow keeps mol/frames in step with it
+        self._overlay: Optional[tuple] = None
         self.result: Optional[AnalysisResult] = None
         self.task: Optional[GuiTask] = None
         self._progress = [0.0]
@@ -456,6 +488,7 @@ class AnalysisDialog(_QDialogT):
             for spin, value in ((self.start_spin, 1), (self.end_spin, n_frames)):
                 spin.setRange(1, n_frames)
                 spin.setValue(value)
+            _couple_range(self.start_spin, self.end_spin)
             cells += [("Start frame", self.start_spin), ("End frame", self.end_spin)]
         for k, (label, w) in enumerate(cells):
             row, col = divmod(k, 3)
@@ -545,8 +578,44 @@ class AnalysisDialog(_QDialogT):
         return w
 
     def _refill_names(self, box, element: str) -> None:
+        keep = box.currentText()
         box.clear()
-        box.addItems([ALL_ATOMS] + names_of(self.mol, element))
+        box.addItems([ALL_ATOMS] + (names_of(self.mol, element) if self.mol is not None else []))
+        if box.findText(keep) >= 0:
+            box.setCurrentText(keep)
+
+    def set_structure(self, mol: Optional[Molecule], frames: Optional[list]) -> None:
+        """Follow the document after an edit, undo or frame change: new atoms, same options."""
+        self.mol, self.frames = mol, frames
+        elements = elements_of(mol) if mol is not None else []
+        for f in self.spec.fields:
+            if f.kind not in ("element", "element_all"):
+                continue
+            box = self.inputs[f.key]
+            keep = box.currentText()
+            items = ([ALL_ATOMS] if f.kind == "element_all" else []) + elements
+            box.blockSignals(True)
+            box.clear()
+            box.addItems(items or ["X"])
+            if box.findText(keep) >= 0:
+                box.setCurrentText(keep)
+            elif f.default == "last":
+                box.setCurrentIndex(box.count() - 1)
+            box.blockSignals(False)
+            box.currentTextChanged.emit(box.currentText())  # refresh linked name boxes
+        n = len(frames) if frames else 0
+        if self.end_spin is not None and n > 1:
+            for spin in (self.start_spin, self.end_spin):
+                spin.setMaximum(n)
+
+    def _snapshot(self) -> tuple:
+        """Copies the worker can read while edits change the live structure. Only the
+        frame being shown can be edited, so the other frames are shared, not copied."""
+        mol = copy.deepcopy(self.mol) if self.mol is not None else None
+        frames = self.frames
+        if frames:
+            frames = [mol if f is self.mol else f for f in frames]
+        return mol, frames
 
     def _browse_dir(self, edit) -> None:
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose a folder", edit.text())
@@ -572,7 +641,8 @@ class AnalysisDialog(_QDialogT):
 
     def run(self) -> GuiTask:
         params = self.params()
-        mol, frames, fn = self.mol, self.frames, self.spec.run
+        mol, frames = self._snapshot()
+        fn = self.spec.run
         self._progress[0] = 0.0
         self.compute_button.setEnabled(False)
         self.status.setText("Computing…")
@@ -596,6 +666,8 @@ class AnalysisDialog(_QDialogT):
             self._set_export_enabled(False)
             return
         self.plot.set_result(res)
+        if self._overlay is not None:  # keep a loaded experimental pattern across recomputes
+            self.plot.set_overlay(*self._overlay)
         self._apply_ymax()
         self._set_export_enabled(True)
 
@@ -603,6 +675,12 @@ class AnalysisDialog(_QDialogT):
         self._progress_timer.stop()
         self.compute_button.setEnabled(True)
         self.status.setText(f"Error: {error}")
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self.task is not None:
+            self.task.detach()
+        self._progress_timer.stop()
+        super().closeEvent(event)
 
     def _apply_ymax(self) -> None:
         if "ymax" in self.inputs and len(self.plot.x):
@@ -635,10 +713,13 @@ class AnalysisDialog(_QDialogT):
         if not path:
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self, "Save plot", f"{self.key}.png", "PNG (*.png)")
-        if path:
-            self.plot.grab().save(path)
-            self.status.setText(f"Wrote {path}")
-        return path or None
+        if not path:
+            return None
+        if not self.plot.grab().save(path):
+            self.status.setText(f"Could not write {path}")
+            return None
+        self.status.setText(f"Wrote {path}")
+        return path
 
     def load_experimental(self, path: Optional[str] = None) -> bool:
         if not path:
@@ -652,7 +733,8 @@ class AnalysisDialog(_QDialogT):
         except Exception as e:  # malformed file
             self.status.setText(f"Error loading: {e}")
             return False
-        self.plot.set_overlay(tt, inten, "experimental")
+        self._overlay = (tt, inten, "experimental")
+        self.plot.set_overlay(*self._overlay)
         self.status.setText(f"Experimental data loaded ({len(tt)} points) — "
                             "blue = simulated, orange = experimental")
         return True
@@ -678,6 +760,7 @@ class EnergyDialog(_QDialogT):
         for spin, value in ((self.start, 1), (self.end, n)):
             spin.setRange(1, max(n, 1))
             spin.setValue(value)
+        _couple_range(self.start, self.end)
         for label, w in (("Column", self.column), ("Start", self.start), ("End", self.end)):
             row.addWidget(QtWidgets.QLabel(label))
             row.addWidget(w)
@@ -757,14 +840,17 @@ class CellDialog(_QDialogT):
                   else (10.0, 10.0, 10.0, 90.0, 90.0, 90.0))
         labels = ("a (Å)", "b (Å)", "c (Å)", "α (°)", "β (°)", "γ (°)")
         self.spins = []
+        self._original = tuple(float(v) for v in values)
+        self._edited = [False] * 6
         for k, (label, v) in enumerate(zip(labels, values)):
             spin = QtWidgets.QDoubleSpinBox()
             if k < 3:
-                spin.setRange(0.01, 10000.0)
+                spin.setRange(0.0001, 1.0e6)
             else:
-                spin.setRange(1.0, 179.0)
-            spin.setDecimals(4)
+                spin.setRange(0.001, 179.999)
+            spin.setDecimals(6)
             spin.setValue(v)
+            spin.valueChanged.connect(lambda _v, i=k: self._edited.__setitem__(i, True))
             self.spins.append(spin)
             form.addRow(label, spin)
         self.remove = QtWidgets.QCheckBox("Remove the cell (no periodic boundaries)")
@@ -779,7 +865,11 @@ class CellDialog(_QDialogT):
 
     def values(self) -> Optional[tuple]:
         """(a, b, c, alpha, beta, gamma), or None to remove the cell."""
-        return None if self.remove.isChecked() else tuple(s.value() for s in self.spins)
+        if self.remove.isChecked():
+            return None
+        # untouched fields return the cell's own values, not the spin boxes' rounding
+        return tuple(s.value() if edited else orig
+                     for s, edited, orig in zip(self.spins, self._edited, self._original))
 
 
 class ReduceCellDialog(_QDialogT):
@@ -801,6 +891,7 @@ class ReduceCellDialog(_QDialogT):
             spin = QtWidgets.QSpinBox()
             spin.setRange(1, 8)
             spin.setValue(2)
+            spin.valueChanged.connect(lambda _v: self._sizes_changed())
             self.spins.append(spin)
             row.addWidget(spin)
             if k < 2:
@@ -826,8 +917,17 @@ class ReduceCellDialog(_QDialogT):
     def sizes(self) -> tuple:
         return tuple(s.value() for s in self.spins)
 
+    def _sizes_changed(self) -> None:
+        if self.reduce_button.isEnabled():  # the analysis was for another size
+            self.reduce_button.setEnabled(False)
+            self.status.setText("Supercell size changed: click Analyze again")
+
     def analyze(self) -> None:
         na, nb, nc = self.sizes()
+        if self.mol.pbc is None:
+            self.status.setText("Reducing a supercell needs a periodic cell")
+            self.reduce_button.setEnabled(False)
+            return
         self.framework, self.sorbates = identify_framework_and_sorbates(self.mol, na, nb, nc)
         self.table.setRowCount(len(self.sorbates))
         for i, idx in enumerate(self.sorbates):
@@ -856,7 +956,7 @@ class ReduceCellDialog(_QDialogT):
                 if self.table.item(i, 0).checkState() == QtCore.Qt.Checked]
 
     def reduce(self) -> Optional[Molecule]:
-        if not self.framework and not self.sorbates:
+        if not self.reduce_button.isEnabled() or (not self.framework and not self.sorbates):
             self.status.setText("Click Analyze first")
             return None
         self.result_mol = reduce_to_primitive(self.mol, *self.sizes(), self.keep())
@@ -938,6 +1038,8 @@ class InputGeneratorDialog(_QDialogT):
         if key == self.engine:
             return
         self._values_by_engine[self.engine] = self.values(strict=False)
+        self._custom_outdir = (self.outdir.text().strip()
+                               != default_engine_outdir(self.filepath, self.engine))
         self.engine = key
         self.engine_box.blockSignals(True)
         self.engine_box.setCurrentIndex(self.engine_box.findData(key))
@@ -947,7 +1049,8 @@ class InputGeneratorDialog(_QDialogT):
     def _load_engine(self) -> None:
         spec = ENGINES[self.engine]
         self.description.setText(spec.description)
-        self.outdir.setText(default_engine_outdir(self.filepath, self.engine))
+        if not getattr(self, "_custom_outdir", False):  # keep a folder the user chose
+            self.outdir.setText(default_engine_outdir(self.filepath, self.engine))
         while self.form.rowCount():
             self.form.removeRow(0)
         self.widgets.clear()
@@ -967,7 +1070,7 @@ class InputGeneratorDialog(_QDialogT):
                 w.setValue(int(value))
             else:  # float, str and csv_floats are typed in, as in the terminal viewer
                 if isinstance(value, list):
-                    value = ", ".join(f"{v:g}" for v in value)
+                    value = ", ".join(repr(float(v)) for v in value)  # exact, not rounded
                 w = QtWidgets.QLineEdit(str(value))
             if var.help:
                 w.setToolTip(var.help)
@@ -998,6 +1101,10 @@ class InputGeneratorDialog(_QDialogT):
                 if strict:
                     raise
         return out
+
+    def set_structure(self, mol: Molecule, frames: Optional[list] = None) -> None:
+        """Follow the document after edits (validation and generation use the new atoms)."""
+        self.mol = mol
 
     def _show(self, outcome) -> None:
         if outcome.preview is not None:
@@ -1083,6 +1190,11 @@ class DatabaseDialog(_QDialogT):
         self.table.currentCellChanged.connect(lambda r, *_: self._preview(r))
         self._source_changed()
 
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self.task is not None:
+            self.task.detach()
+        super().closeEvent(event)
+
     def _source_changed(self) -> None:
         current = self.mode.currentData()
         self.mode.blockSignals(True)
@@ -1102,7 +1214,7 @@ class DatabaseDialog(_QDialogT):
             return
         r = self.results[row]
         label = BACKENDS.get(r.get("source", ""), {}).get("label", r.get("source", ""))
-        bits = [f"<b>{label}</b> {r.get('id', '')}"]
+        bits = [f"<b>{label}</b> {r.get('id') or ''}"]
         if r.get("formula"):
             bits.append(f"formula: {r['formula']}")
         if r.get("title"):
@@ -1130,9 +1242,10 @@ class DatabaseDialog(_QDialogT):
         self.table.setRowCount(len(self.results))
         for i, r in enumerate(self.results):
             label = BACKENDS.get(r.get("source", ""), {}).get("label", r.get("source", ""))
-            for j, text in enumerate((label, r.get("id", ""), r.get("formula", "")[:25],
-                                      r.get("title", "")[:60])):
-                self.table.setItem(i, j, QtWidgets.QTableWidgetItem(str(text)))
+            cells = (label, str(r.get("id") or ""), str(r.get("formula") or "")[:25],
+                     str(r.get("title") or "")[:60])
+            for j, text in enumerate(cells):
+                self.table.setItem(i, j, QtWidgets.QTableWidgetItem(text))
         self.status.setText(msg)
         self.preview.setText("")
 
@@ -1142,7 +1255,10 @@ class DatabaseDialog(_QDialogT):
             self.status.setText("Select a result first")
             return None
         r = self.results[row]
-        return self._fetch(r.get("source", ""), r.get("id", ""))
+        if not r.get("id"):
+            self.status.setText("This result has no ID to fetch")
+            return None
+        return self._fetch(r.get("source", ""), str(r["id"]))
 
     def fetch_by_id(self) -> Optional[GuiTask]:
         source = self.source.currentData()
@@ -1167,7 +1283,11 @@ class DatabaseDialog(_QDialogT):
         cache = self.cache_dir
 
         def done(path: str) -> None:
-            self.on_fetched(path, spec["label"], rid)
+            try:
+                self.on_fetched(path, spec["label"], rid)
+            except Exception as e:  # e.g. a download that is not a readable structure
+                self.status.setText(f"Error opening {rid}: {e}")
+                return
             self.accept()
 
         self.task = GuiTask(lambda: spec["fetch"](rid, cache), done,
@@ -1340,7 +1460,9 @@ class GuiGeometryPanel(_QWidgetT):
         try:
             xyz = tuple(float(t.item(row, c).text()) for c in (2, 3, 4))
         except (ValueError, AttributeError):
-            self.refresh_visible(force=True)  # put the old value back
+            xyz = ()
+        if len(xyz) != 3 or not np.all(np.isfinite(xyz)):
+            self.refresh_visible(force=True)  # not a usable number: put the old value back
             return
         self.on_edit_coord(self._indices[name][row][0], xyz)
 
@@ -1386,7 +1508,7 @@ class GuiFrameBar(_QWidgetT):
         self.buttons["slower"] = QtWidgets.QToolButton()
         self.buttons["slower"].setText("−")
         self.buttons["slower"].setToolTip("Slower")
-        self.speed_label = QtWidgets.QLabel("1.0x")
+        self.speed_label = QtWidgets.QLabel("1x")
         self.buttons["faster"] = QtWidgets.QToolButton()
         self.buttons["faster"].setText("+")
         self.buttons["faster"].setToolTip("Faster")
@@ -1435,7 +1557,7 @@ class GuiFrameBar(_QWidgetT):
 
     def set_speed(self, speed: float) -> None:
         self.speed = float(min(16.0, max(0.125, speed)))
-        self.speed_label.setText(f"{self.speed:.1f}x")
+        self.speed_label.setText(f"{self.speed:g}x")
         self.timer.setInterval(max(1, int(self.BASE_INTERVAL_MS / self.speed)))
 
     def toggle_play(self) -> None:

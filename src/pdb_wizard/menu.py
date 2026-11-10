@@ -24,7 +24,7 @@ from pdb_wizard.io import (
     assign_framework_charges,
     check_pdb_trajectory,
     check_xyz_trajectory,
-    mpmc_movable_count,
+    next_mpmc_mol_id,
     read_charges_file,
     read_pdb,
     read_pdb_trajectory,
@@ -386,7 +386,7 @@ def _menu_insert_sorbates(mol: Molecule) -> None:
     if not placed:
         return
     lines = format_inserted_sorbates(model, placed, start_atom_id=len(mol.atoms) + 1,
-                                     start_mol_id=2 + mpmc_movable_count(mol))
+                                     start_mol_id=next_mpmc_mol_id(mol))
     filename = input("\noutput filename > ")
     write_mpmc_pdb(mol, filename, sorbate_lines=lines)
     print(f"\nwrote {filename}\n")

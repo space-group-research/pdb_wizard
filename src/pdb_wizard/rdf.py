@@ -127,8 +127,12 @@ def compute_rdf_trajectory(
     n_frames = len(frames)
 
     for fi, mol in enumerate(frames):
+        def _frame_progress(frac, _fi=fi):
+            if progress_callback:
+                progress_callback((_fi + frac) / n_frames)
+
         r, g = compute_rdf(mol, type1, type2, n_bins=n_bins, r_max=r_max,
-                           name1=name1, name2=name2)
+                           progress_callback=_frame_progress, name1=name1, name2=name2)
         if len(r) == 0:
             continue
         if g_sum is None:

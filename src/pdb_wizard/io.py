@@ -146,6 +146,14 @@ def mpmc_movable_count(mol: Molecule) -> int:
     return len({a.mpmc_mol for a in mol.atoms if a.mpmc_flag == "M"})
 
 
+def next_mpmc_mol_id(mol: Molecule) -> int:
+    """Molecule id for the next sorbate added to ``mol``: one past the highest movable id
+    (the framework is molecule 1). Counting molecules is not enough: supercells and
+    deletions leave gaps, and a reused id merges two sorbates into one MPMC molecule."""
+    ids = [a.mpmc_mol for a in mol.atoms if a.mpmc_flag == "M" and isinstance(a.mpmc_mol, int)]
+    return max(ids) + 1 if ids else 2
+
+
 def _file_is_mpmc(lines: list[str]) -> bool:
     for line in lines:
         if line.startswith(_MPMC_FILE_MARKERS):
@@ -1431,7 +1439,11 @@ def read_pdb_trajectory(file: TextIO, progress_callback=None) -> tuple[list[Mole
             if system:
                 molecules.append(Molecule(atoms=system, pbc=pbc))
                 pbcs.append(pbc)
-        frame_lines = []
+            frame_lines = []
+        else:
+            # A cell written before MODEL (CRYST1 per frame, or once at the top as VMD
+            # and MDAnalysis do) belongs to the frame that follows; don't drop it.
+            frame_lines = [ln for ln in frame_lines if ln.startswith(("CRYST1", "REMARK BOX"))]
         atoms_in_frame = 0
 
     for li, line in enumerate(all_lines):

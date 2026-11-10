@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pdb_wizard.io import mpmc_movable_count, write_mpmc_pdb
+from pdb_wizard.io import next_mpmc_mol_id, write_mpmc_pdb
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.sorbates import format_sorbate_pqr
 from pdb_wizard.templates import load_template, render
@@ -205,7 +205,7 @@ def generate_isotherm(
         sx, sy, sz = sorbate_pos
 
     sorbate_lines = format_sorbate_pqr(
-        sorbate_model, sx, sy, sz, mol_id=2 + mpmc_movable_count(mol),
+        sorbate_model, sx, sy, sz, mol_id=next_mpmc_mol_id(mol),
         start_atom_id=len(mol.atoms) + 1,
     )
 

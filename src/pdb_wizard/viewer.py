@@ -2105,9 +2105,12 @@ class InputGeneratorScreen(ModalScreen[None]):
         new_key = str(event.value)
         if new_key == self._engine_key:
             return
+        # Move the output folder to the new engine's default, unless the user chose one
+        outdir = self.query_one("#gen-outdir", Input)
+        keep = outdir.value.strip() != self._default_outdir()
         self._engine_key = new_key
-        # Reset outdir to engine default
-        self.query_one("#gen-outdir", Input).value = self._default_outdir()
+        if not keep:
+            outdir.value = self._default_outdir()
         self._build_form()
         self._update_description()
         if new_key == "mpmc_isotherm":
@@ -2176,14 +2179,6 @@ class InputGeneratorScreen(ModalScreen[None]):
     # ---------------------------------------------------------------
     # MPMC validation
     # ---------------------------------------------------------------
-    def _validate_mpmc(self) -> tuple[list[str], list[str]]:
-        from pdb_wizard.inputgen import validate_mpmc_inputs
-        return validate_mpmc_inputs(self._molecule)
-
-    def _format_validation(self, errors: list[str], warnings: list[str]) -> str:
-        from pdb_wizard.inputgen import format_validation
-        return format_validation(errors, warnings)
-
     def _show_validation(self) -> None:
         from pdb_wizard.inputgen import check_engine
         self._show_outcome(check_engine(self._molecule, self._engine_key))
@@ -2422,9 +2417,9 @@ class DatabaseSearchScreen(ModalScreen[None]):
             label = BACKENDS.get(r.get("source", ""), {}).get("label", r.get("source", ""))
             table.add_row(
                 label,
-                r.get("id", ""),
-                r.get("formula", "")[:25],
-                r.get("title", "")[:60],
+                str(r.get("id") or ""),
+                str(r.get("formula") or "")[:25],
+                str(r.get("title") or "")[:60],
             )
         status.update(msg)
         self.query_one("#db-preview", Label).update("")
@@ -4072,7 +4067,7 @@ class PdbWizardApp(App):
             yield Button(">", id="traj-next")
             yield Button(">|", id="traj-last")
             yield Button("Slow", id="traj-slower")
-            yield Label("1.0x", id="traj-speed")
+            yield Label("1x", id="traj-speed")
             yield Button("Fast", id="traj-faster")
             yield TrackSlider(id="traj-slider")
             yield Label("1/1", id="traj-label")
@@ -4576,7 +4571,7 @@ class PdbWizardApp(App):
             self._update_play_speed()
 
     def _update_play_speed(self) -> None:
-        self.query_one("#traj-speed", Label).update(f"{self._play_speed:.1f}x")
+        self.query_one("#traj-speed", Label).update(f"{self._play_speed:g}x")
         # Restart timer at new speed if playing
         if self._play_timer is not None:
             self._play_timer.stop()
@@ -6212,19 +6207,17 @@ class PdbWizardApp(App):
     def _pack_step_count(self, model, value: str | None) -> None:
         if not value or not value.strip():
             return  # Cancel / Escape
-        raw = value.strip().lower()
-        if raw == "fill":
-            n = None
-        elif raw.isdigit() and int(raw) > 0:
-            n = int(raw)
-        else:
-            self.notify("Enter a positive number or 'fill'", severity="warning")
+        from pdb_wizard.sorbates import parse_sorbate_count
+        try:
+            n = parse_sorbate_count(value)
+        except ValueError as e:
+            self.notify(str(e), severity="warning")
             self._pack_ask_count(model)
             return
         self._track_task(self._pack_sorbates_async(model, n))
 
     async def _pack_sorbates_async(self, model, n: int | None) -> None:
-        from pdb_wizard.io import mpmc_movable_count
+        from pdb_wizard.io import next_mpmc_mol_id
         from pdb_wizard.sorbates import insert_sorbates, sorbate_atoms
         mol = self.molecule
         self._show_progress(f"Packing {model.label}...")
@@ -6236,7 +6229,7 @@ class PdbWizardApp(App):
                         severity="error", timeout=5)
             return
         self._save_undo()
-        mol.atoms.extend(sorbate_atoms(model, placed, 2 + mpmc_movable_count(mol)))
+        mol.atoms.extend(sorbate_atoms(model, placed, next_mpmc_mol_id(mol)))
         full = "" if n is None or len(placed) == n else f" (asked for {n}; the cell is full)"
         await self._refresh_molecule(
             f"Packed {len(placed)} {model.label}{full}. Save as MPMC PDB for MPMC.")
@@ -6266,13 +6259,11 @@ class PdbWizardApp(App):
     def _mpmc_step_sorbate_count(self, value: str | None) -> None:
         if not value or not value.strip():
             return  # Cancel / Escape (InputModal returns ""): abort the MPMC export
-        raw = value.strip().lower()
-        if raw == "fill":
-            self._mpmc_state["sorbate_n"] = None
-        elif raw.isdigit() and int(raw) > 0:
-            self._mpmc_state["sorbate_n"] = int(raw)
-        else:
-            self.notify("Enter a positive number or 'fill'", severity="warning")
+        from pdb_wizard.sorbates import parse_sorbate_count
+        try:
+            self._mpmc_state["sorbate_n"] = parse_sorbate_count(value)
+        except ValueError as e:
+            self.notify(str(e), severity="warning")
             self._mpmc_step_sorbate_result(self._mpmc_state["sorbate"])
             return
         self._mpmc_step_filename()
@@ -6297,7 +6288,7 @@ class PdbWizardApp(App):
         sorbate_lines = None
         sorbate_name = self._mpmc_state.get("sorbate")
         if sorbate_name:
-            from pdb_wizard.io import mpmc_movable_count
+            from pdb_wizard.io import next_mpmc_mol_id
             from pdb_wizard.sorbates import format_inserted_sorbates, insert_sorbates
             mol = self.molecule
             n_want = self._mpmc_state.get("sorbate_n", 1)
@@ -6310,7 +6301,7 @@ class PdbWizardApp(App):
                 self.notify(f"Placed {len(placed)} molecules (cell full)", timeout=5)
             sorbate_lines = format_inserted_sorbates(
                 sorbate_name, placed, start_atom_id=len(mol.atoms) + 1,
-                start_mol_id=2 + mpmc_movable_count(mol),
+                start_mol_id=next_mpmc_mol_id(mol),
             )
 
         self._write_text_file(

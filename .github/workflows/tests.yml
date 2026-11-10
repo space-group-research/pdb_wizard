@@ -13,6 +13,8 @@ jobs:
         python-version: ["3.9", "3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the regression tests compare against origin/main
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -28,7 +30,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         # Timing budgets in test_perf.py assume an idle machine, so run it on its own.
         run: |
-          python -m pytest -n auto --ignore=tests/test_perf.py
+          python -m pytest -n auto --ignore=tests/test_perf.py --baseline origin/main
           python -m pytest tests/test_perf.py
 
   minimum-python:
