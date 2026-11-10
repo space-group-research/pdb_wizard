@@ -388,7 +388,10 @@ def test_extend_axis_is_unchanged(bw, structure):
     assert cell(p) == cell(b) and atom_rows(p) == atom_rows(b)
 
 
-def test_qeq_is_unchanged_on_small_frameworks(bw, structure):
+def test_qeq_runs_on_the_same_small_frameworks(bw, structure):
+    """QEq was rewritten on purpose (2026-11-10: the old version used a bare 14.4/R and
+    inverted the signs), so the values differ from older baselines. What must not change
+    is which structures it runs on; tests/test_qeq_reference.py checks the values."""
     if has_movable(structure):
         return
     (b, _), (p, _) = read_both(bw, structure)
@@ -401,7 +404,8 @@ def test_qeq_is_unchanged_on_small_frameworks(bw, structure):
             pw.apply_qeq_charges(p)
         return
     pw.apply_qeq_charges(p)
-    assert [a.charge for a in p.atoms] == [a.charge for a in b.atoms]
+    charges = np.array([a.charge for a in p.atoms])
+    assert np.all(np.isfinite(charges)) and abs(charges.sum()) < 1e-6
 
 
 def test_charges_file_prompt_is_unchanged_on_frameworks(bw, structure, tmp_path, monkeypatch):

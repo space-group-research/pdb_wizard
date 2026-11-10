@@ -2178,7 +2178,8 @@ class InputGeneratorScreen(ModalScreen[None]):
     # ---------------------------------------------------------------
     def _show_validation(self) -> None:
         from pdb_wizard.inputgen import check_engine
-        self._show_outcome(check_engine(self._molecule, self._engine_key))
+        self._show_outcome(check_engine(self._molecule, self._engine_key,
+                                        self._collect_values(strict=False)))
 
     def _show_outcome(self, outcome) -> None:
         if outcome.preview is not None:

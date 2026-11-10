@@ -97,8 +97,45 @@ def compute_pxrd(
     if mol.pbc is None or len(mol.atoms) == 0:
         return np.array([]), np.array([])
 
+    two_theta_all, intensities = pxrd_reflections(mol, wavelength, two_theta_min,
+                                                  two_theta_max)
+    reflections = list(zip(two_theta_all.tolist(), intensities.tolist()))
+
+    if progress_callback:
+        progress_callback(1.0)
+
+    if not reflections:
+        return np.array([]), np.array([])
+
+    # Build pattern by convolving with Gaussian peaks
+    two_theta_arr = np.linspace(two_theta_min, two_theta_max, n_points)
+    pattern = np.zeros(n_points)
+
+    sigma = peak_width / (2 * np.sqrt(2 * np.log(2)))  # FWHM to sigma
+
+    for tt, intensity in reflections:
+        peak = intensity * np.exp(-0.5 * ((two_theta_arr - tt) / sigma) ** 2)
+        pattern += peak
+
+    # Normalize to max = 100
+    if pattern.max() > 0:
+        pattern = pattern / pattern.max() * 100
+
+    return two_theta_arr, pattern
+
+
+def pxrd_reflections(mol: Molecule, wavelength: float = 1.5406, two_theta_min: float = 5.0,
+                     two_theta_max: float = 50.0, with_hkl: bool = False):
+    """(2-theta, intensity) of every reflection in range; with ``with_hkl`` also the indices.
+
+    Intensities are |F|^2 times the Lorentz-polarization factor.
+    """
     pbc = mol.pbc
-    recip = pbc.reciprocal_basis_matrix  # rows are reciprocal vectors
+    # pbc.reciprocal_basis_matrix is inv(basis): its COLUMNS are the reciprocal vectors
+    # a*, b*, c* (a_i . a*_j = delta_ij), so G = h a* + k b* + l c* = hkl @ inv(basis).T.
+    # Using its rows put peaks in the wrong place for any non-orthogonal cell.
+    inv_basis = pbc.reciprocal_basis_matrix
+    recip_vectors = inv_basis.T
 
     # Determine hkl range from max 2-theta
     # d_min = lambda / (2 * sin(theta_max))
@@ -121,7 +158,7 @@ def compute_pxrd(
     unique_elements = list(set(elements.tolist()))
 
     # Pre-compute fractional coordinates and element-grouped slices
-    frac_coords = coords @ recip
+    frac_coords = coords @ inv_basis
     el_groups = {el: frac_coords[elements == el] for el in unique_elements}
 
     # Generate the full (h,k,l) grid, drop (0,0,0), filter to two_theta range.
@@ -131,7 +168,7 @@ def compute_pxrd(
     H, K, L = np.meshgrid(h_arr, k_arr, l_arr, indexing="ij")
     hkl = np.stack([H.ravel(), K.ravel(), L.ravel()], axis=1)        # (M, 3)
     hkl = hkl[(hkl != 0).any(axis=1)]
-    G_all = hkl.astype(float) @ recip                                # (M, 3)
+    G_all = hkl.astype(float) @ recip_vectors                        # (M, 3)
     G_norm = np.linalg.norm(G_all, axis=1)
     valid = G_norm > 1e-10
     hkl = hkl[valid]
@@ -180,26 +217,6 @@ def compute_pxrd(
     lp = np.where(np.abs(denom) > 1e-10, (1 + cos2t ** 2) / denom, 0.0)
     intensities *= np.abs(lp)
 
-    reflections = list(zip(two_theta_all.tolist(), intensities.tolist()))
-
-    if progress_callback:
-        progress_callback(1.0)
-
-    if not reflections:
-        return np.array([]), np.array([])
-
-    # Build pattern by convolving with Gaussian peaks
-    two_theta_arr = np.linspace(two_theta_min, two_theta_max, n_points)
-    pattern = np.zeros(n_points)
-
-    sigma = peak_width / (2 * np.sqrt(2 * np.log(2)))  # FWHM to sigma
-
-    for tt, intensity in reflections:
-        peak = intensity * np.exp(-0.5 * ((two_theta_arr - tt) / sigma) ** 2)
-        pattern += peak
-
-    # Normalize to max = 100
-    if pattern.max() > 0:
-        pattern = pattern / pattern.max() * 100
-
-    return two_theta_arr, pattern
+    if with_hkl:
+        return two_theta_all, intensities, hkl
+    return two_theta_all, intensities

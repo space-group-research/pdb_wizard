@@ -29,10 +29,63 @@ _EPSILON_SET = 0.1
 _SORBATE_OVERLAP = 1.5
 
 
+# Polarization and PHAHST settings from the MPMC tutorials, which call them "generally
+# acceptable for most situations" (tutorials/02_bssp_h2_mof-5, 03_phahst_h2_hkust-1).
+_POLARIZATION_KEYWORDS = """polarization          on
+polar_damp_type       exponential
+polar_damp            2.1304
+polar_wolf            on
+polar_wolf_alpha      0.13
+polar_iterative       on
+polar_palmo           on
+polar_gs_ranked       on
+polar_gamma           1.03
+polar_max_iter        4"""
+_PHAHST_KEYWORDS = """disp_expansion        on
+extrapolate_disp_coeffs on
+damp_dispersion       on
+cavity_autoreject_repulsion 10000"""
+
+
+def _model_flags(mol: Molecule, sorbate_model=None) -> dict:
+    """What the framework and sorbate parameters need MPMC to switch on."""
+    from pdb_wizard.sorbates import SORBATE_MODELS
+    model = SORBATE_MODELS.get(sorbate_model) if isinstance(sorbate_model, str) else sorbate_model
+    sites = model.sites if model is not None else []
+    framework = [a for a in mol.atoms if a.mpmc_flag != "M"]
+    return {
+        "polar": any(a.alpha > 0 for a in mol.atoms) or any(s.polarizability > 0 for s in sites),
+        "phahst_framework": any(max(a.c6, a.c8, a.c10) > 0 for a in framework),
+        "phahst_sorbate": any(max(s.c6, s.c8, s.c10) > 0 for s in sites),
+        "lj_sorbate": bool(sites) and not any(max(s.c6, s.c8, s.c10) > 0 for s in sites),
+        "sorbate_charged": any(abs(s.charge) > _CHARGE_NONZERO for s in sites),
+        "sorbate_known": model is not None,
+    }
+
+
+def mpmc_model_keywords(mol: Molecule, sorbate_model=None) -> str:
+    """The mpmc.inp lines the PQR parameters need.
+
+    Without them MPMC ignores the polarizabilities and reads PHAHST beta/rho (columns
+    13-14) as Lennard-Jones epsilon/sigma. The cutoff is half the smallest perpendicular
+    cell width: the same as MPMC's default (half the shortest lattice vector) for an
+    orthogonal cell, and inside the minimum-image limit for a skewed one.
+    """
+    flags = _model_flags(mol, sorbate_model)
+    cutoff = float(mol.pbc.perpendicular_widths().min()) / 2.0
+    lines = [f"pbc_cutoff            {np.floor(cutoff * 1e4) / 1e4:.4f}"]
+    if flags["phahst_framework"] or flags["phahst_sorbate"]:
+        lines += ["", _PHAHST_KEYWORDS]
+    if flags["polar"]:
+        lines += ["", _POLARIZATION_KEYWORDS]
+    return "\n".join(lines)
+
+
 def validate_for_mpmc(
     mol: Molecule,
     sorbate_pos: tuple[float, float, float] | None = None,
     lj_cutoff: float = _DEFAULT_LJ_CUTOFF,
+    sorbate_model=None,
 ) -> tuple[list[str], list[str]]:
     """Inspect a molecule for common MPMC-input footguns.
 
@@ -66,10 +119,13 @@ def validate_for_mpmc(
         errors.append("Molecule has no atoms.")
         return errors, warnings
 
-    # Charges
+    # Charges (an uncharged framework is fine with an uncharged sorbate, e.g. TraPPE CH4)
+    flags = _model_flags(mol, sorbate_model)
     charges = np.array([a.charge for a in mol.atoms])
     n_set = int((np.abs(charges) > _CHARGE_NONZERO).sum())
-    if n_set == 0:
+    if n_set == 0 and flags["sorbate_known"] and not flags["sorbate_charged"]:
+        pass
+    elif n_set == 0:
         errors.append(
             "All atom charges are zero. Apply a force field or "
             "Generate QEq Charges before planning the isotherm — otherwise "
@@ -97,6 +153,14 @@ def validate_for_mpmc(
         warnings.append(
             f"Only {n_lj_set}/{n} atoms have nonzero LJ epsilon. "
             f"Some elements are likely missing from the chosen force field."
+        )
+
+    if flags["phahst_framework"] != flags["phahst_sorbate"] and flags["sorbate_known"]:
+        which = "framework" if flags["phahst_framework"] else "sorbate"
+        warnings.append(
+            f"Only the {which} has PHAHST (C6/C8/C10) parameters. MPMC's disp_expansion "
+            f"applies to every pair, so the other side's LJ epsilon/sigma would be read as "
+            f"exponential-repulsion beta/rho. Use PHAHST (or LJ) for both."
         )
 
     # Box size vs LJ cutoff. Minimum image is only exact up to half the
@@ -240,6 +304,7 @@ def generate_isotherm(
             "move_factor": move_factor,
             "rot_factor": rot_factor,
             "pqr_input": "input.pqr",
+            "model_keywords": mpmc_model_keywords(mol, sorbate_model),
         })
         (p_dir / "mpmc.inp").write_text(rendered)
 

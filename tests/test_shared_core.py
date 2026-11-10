@@ -248,12 +248,12 @@ def test_checks_and_generation(tmp_path):
 
 def test_mpmc_generation_refuses_on_errors_and_runs_when_clean(tmp_path, monkeypatch):
     mol = read_file(str(HKUST))
-    monkeypatch.setattr(inputgen, "validate_mpmc_inputs", lambda m: (["no charges"], []))
+    monkeypatch.setattr(inputgen, "validate_mpmc_inputs", lambda m, s=None: (["no charges"], []))
     out = inputgen.generate_engine_inputs(mol, "mpmc_isotherm", _values("mpmc_isotherm"),
                                           str(tmp_path / "a"))
     assert not out.ok and out.status.startswith("Refusing: 1 error ")
     assert "✗ no charges" in out.preview
-    monkeypatch.setattr(inputgen, "validate_mpmc_inputs", lambda m: ([], ["small box"]))
+    monkeypatch.setattr(inputgen, "validate_mpmc_inputs", lambda m, s=None: ([], ["small box"]))
     values = _values("mpmc_isotherm")
     values["pressures"] = [0.1, 1.0]
     out = inputgen.generate_engine_inputs(mol, "mpmc_isotherm", values, str(tmp_path / "b"))
@@ -262,9 +262,9 @@ def test_mpmc_generation_refuses_on_errors_and_runs_when_clean(tmp_path, monkeyp
     assert "⚠ 1 warning" in inputgen.format_validation([], ["small box"])
     assert inputgen.format_validation([], []).startswith("✓ All checks passed")
     assert inputgen.check_engine(mol, "mpmc_isotherm").status.startswith("1 warning")
-    monkeypatch.setattr(inputgen, "validate_mpmc_inputs", lambda m: (["e1", "e2"], []))
+    monkeypatch.setattr(inputgen, "validate_mpmc_inputs", lambda m, s=None: (["e1", "e2"], []))
     assert inputgen.check_engine(mol, "mpmc_isotherm").status == "2 errors — fix before Generate"
-    monkeypatch.setattr(inputgen, "validate_mpmc_inputs", lambda m: ([], []))
+    monkeypatch.setattr(inputgen, "validate_mpmc_inputs", lambda m, s=None: ([], []))
     assert inputgen.check_engine(mol, "mpmc_isotherm").status == "Ready to generate"
 
 

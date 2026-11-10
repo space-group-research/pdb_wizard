@@ -30,5 +30,7 @@ energy_output         energy.dat
 rd_lrc                on
 wrapall               on
 
+{{{model_keywords}}}
+
 pop_histogram         on
 pop_histogram_output  histogram.dat

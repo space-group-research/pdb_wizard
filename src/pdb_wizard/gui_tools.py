@@ -1109,7 +1109,7 @@ class InputGeneratorDialog(_QDialogT):
         self.status.setText(outcome.status)
 
     def validate(self) -> None:
-        self._show(check_engine(self.mol, self.engine))
+        self._show(check_engine(self.mol, self.engine, self.values(strict=False)))
 
     def show_template(self) -> None:
         self._show(engine_template_text(self.engine))

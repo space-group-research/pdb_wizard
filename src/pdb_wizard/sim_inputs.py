@@ -173,6 +173,15 @@ def _write_xyz(mol: Molecule, path: Path) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def _cell_vector_vars(pbc) -> dict:
+    """{'cell_vec_a': 'ax ay az', ...}: the rows of the cell's basis matrix, in Å."""
+    def fmt(row):
+        return " ".join(f"{round(float(v), 6) + 0.0:.6f}" for v in row)
+
+    a, b, c = pbc.basis_matrix
+    return {"cell_vec_a": fmt(a), "cell_vec_b": fmt(b), "cell_vec_c": fmt(c)}
+
+
 def generate_cp2k_input(
     mol: Molecule,
     output_dir: str | Path,
@@ -207,15 +216,12 @@ def generate_cp2k_input(
     xyz_path = out / coords_filename
     _write_xyz(mol, xyz_path)
 
-    pbc = mol.pbc
+    # The cell vectors themselves, in the frame of the XYZ coordinates. CP2K's
+    # ALPHA_BETA_GAMMA only applies together with ABC, so writing orthogonal A/B/C plus
+    # angles (as before) gave a rectangular box for hexagonal or monoclinic cells.
     common_vars = {
         "project": project_name,
-        "cell_a": f"{pbc.a:.6f}",
-        "cell_b": f"{pbc.b:.6f}",
-        "cell_c": f"{pbc.c:.6f}",
-        "cell_alpha": f"{pbc.alpha:.4f}",
-        "cell_beta": f"{pbc.beta:.4f}",
-        "cell_gamma": f"{pbc.gamma:.4f}",
+        **_cell_vector_vars(mol.pbc),
         "coords_file": coords_filename,
         "kind_blocks": _build_kind_blocks(mol),
         "cutoff_ry": cutoff_Ry,

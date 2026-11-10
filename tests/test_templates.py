@@ -28,16 +28,10 @@ from pdb_wizard.templates import (
 _GENERATOR_VARS = {
     "mpmc_isotherm": {
         "cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma",
-        "job_name", "pressure", "pqr_input",
+        "job_name", "pressure", "pqr_input", "model_keywords",
     },
-    "cp2k_cell_opt": {
-        "cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma",
-        "coords_file", "kind_blocks",
-    },
-    "cp2k_dft_md": {
-        "cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma",
-        "coords_file", "kind_blocks",
-    },
+    "cp2k_cell_opt": {"cell_vec_a", "cell_vec_b", "cell_vec_c", "coords_file", "kind_blocks"},
+    "cp2k_dft_md": {"cell_vec_a", "cell_vec_b", "cell_vec_c", "coords_file", "kind_blocks"},
     "openmm_npt": {
         "forcefield_xmls", "pdb_filename", "script_filename",
     },
@@ -201,9 +195,11 @@ def _dummy_render_vars(engine_key: str) -> dict:
     gen = {
         "cell_a": "20.0", "cell_b": "20.0", "cell_c": "20.0",
         "cell_alpha": "90.0", "cell_beta": "90.0", "cell_gamma": "90.0",
+        "cell_vec_a": "20.0 0.0 0.0", "cell_vec_b": "0.0 20.0 0.0", "cell_vec_c": "0.0 0.0 20.0",
         "job_name": "test_job",
         "pressure": "1.0",
         "pqr_input": "input.pqr",
+        "model_keywords": "pbc_cutoff 10.0",
         "coords_file": "system.xyz",
         "kind_blocks": _dummy_kind_blocks(),
         "forcefield_xmls": "'amber14-all.xml'",

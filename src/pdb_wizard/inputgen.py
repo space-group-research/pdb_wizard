@@ -72,17 +72,21 @@ def format_validation(errors: List[str], warnings: List[str]) -> str:
     return "\n".join(lines)
 
 
-def validate_mpmc_inputs(mol: Molecule) -> Tuple[List[str], List[str]]:
+def validate_mpmc_inputs(mol: Molecule,
+                         sorbate: Optional[str] = None) -> Tuple[List[str], List[str]]:
     from pdb_wizard.isotherm import validate_for_mpmc
-    return validate_for_mpmc(mol)
+    return validate_for_mpmc(mol, sorbate_model=sorbate)
 
 
-def check_engine(mol: Molecule, engine: str) -> GenOutcome:
-    """The Validate button: MPMC's full checks, or the periodic-box check for the others."""
+def check_engine(mol: Molecule, engine: str,
+                 values: Optional[Dict[str, Any]] = None) -> GenOutcome:
+    """The Validate button: MPMC's full checks, or the periodic-box check for the others.
+
+    ``values`` are the form's current values (the MPMC checks depend on the sorbate)."""
     if engine not in ENGINES:
         return GenOutcome(False, f"Unknown engine: {engine}")
     if engine == "mpmc_isotherm":
-        errors, warnings = validate_mpmc_inputs(mol)
+        errors, warnings = validate_mpmc_inputs(mol, (values or {}).get("sorbate"))
         preview = format_validation(errors, warnings)
         if errors:
             return GenOutcome(False, f"{_plural_s(len(errors), 'error')} — fix before Generate",
@@ -133,7 +137,7 @@ def generate_engine_inputs(mol: Molecule, engine: str, values: Dict[str, Any],
 
 def _generate_mpmc(mol: Molecule, values: Dict[str, Any], outdir: str) -> GenOutcome:
     from pdb_wizard.isotherm import generate_isotherm
-    errors, warnings = validate_mpmc_inputs(mol)
+    errors, warnings = validate_mpmc_inputs(mol, values.get("sorbate"))
     if errors:  # refuse; warnings are allowed
         return GenOutcome(False, f"Refusing: {_plural_s(len(errors), 'error')} "
                               f"would produce a meaningless run",
