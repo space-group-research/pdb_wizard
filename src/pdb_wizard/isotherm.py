@@ -12,12 +12,13 @@ from pathlib import Path
 
 import numpy as np
 
-from pdb_wizard.io import write_mpmc_pdb
+from pdb_wizard.io import mpmc_movable_count, write_mpmc_pdb
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.sorbates import format_sorbate_pqr
 from pdb_wizard.templates import load_template, render
 
-# Default MPMC LJ cutoff in Å. The simulation needs min(a,b,c)/2 > this.
+# LJ cutoff (Å) the box is checked against. Minimum image needs half the
+# smallest perpendicular cell width to be at least this.
 _DEFAULT_LJ_CUTOFF = 10.0
 # A charge is "set" if |q| exceeds this — anything smaller is rounding noise.
 _CHARGE_NONZERO = 1e-9
@@ -45,9 +46,12 @@ def validate_for_mpmc(
 
     Warnings:
       - |net charge| > 1e-3 e (non-neutral box)
-      - min(a,b,c)/2 < lj_cutoff (box too small for default LJ cutoff)
+      - Half the smallest perpendicular width < lj_cutoff (cell too thin)
+      - MPMC's automatic cutoff exceeds the minimum-image limit (skewed cell)
       - Sorbate placement overlaps a framework atom (within 1.5 Å)
-      - Triclinic cell (α/β/γ deviates from 90° — abcbasis loses info)
+
+    Triclinic cells need no warning: 'abcbasis a b c α β γ' builds the same
+    basis (a along x, b in the xy plane) as PBC._compute_matrices.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -95,24 +99,30 @@ def validate_for_mpmc(
             f"Some elements are likely missing from the chosen force field."
         )
 
-    # Box size vs LJ cutoff
+    # Box size vs LJ cutoff. Minimum image is only exact up to half the
+    # smallest perpendicular width, which for a skewed cell is less than
+    # min(a, b, c) / 2.
     pbc = mol.pbc
-    half_min = min(pbc.a, pbc.b, pbc.c) / 2.0
-    if half_min < lj_cutoff:
+    max_cutoff = float(pbc.perpendicular_widths().min()) / 2.0
+    if max_cutoff < lj_cutoff:
         warnings.append(
-            f"Smallest box half-length is {half_min:.2f} Å but MPMC's default "
-            f"LJ cutoff is {lj_cutoff:.1f} Å. Either build a supercell "
-            f"(Edit > Extend Axis) or reduce the cutoff in mpmc.inp."
+            f"Cell is too thin for a {lj_cutoff:.1f} Å cutoff: half the "
+            f"smallest perpendicular width is {max_cutoff:.2f} Å. Either build "
+            f"a supercell (Edit > Extend Axis) or set pbc_cutoff ≤ "
+            f"{max_cutoff:.2f} in mpmc.inp."
         )
 
-    # Triclinic cell
-    if (abs(pbc.alpha - 90.0) > 0.5
-            or abs(pbc.beta - 90.0) > 0.5
-            or abs(pbc.gamma - 90.0) > 0.5):
+    # Without pbc_cutoff, MPMC uses half the shortest lattice vector, which
+    # exceeds the minimum-image limit in any non-orthogonal cell. Only pairs
+    # in the shell between the two radii are affected, so stay quiet for
+    # mild skew (<5%); a hexagonal cell (γ = 120°) is ~15% over.
+    mpmc_auto = pbc.shortest_lattice_vector() / 2.0
+    if mpmc_auto > 1.05 * max_cutoff:
         warnings.append(
-            f"Cell is not orthorhombic (α={pbc.alpha:.2f}, β={pbc.beta:.2f}, "
-            f"γ={pbc.gamma:.2f}). 'abcbasis' in mpmc.inp loses skew "
-            f"information; use 'pbc_input' with the basis matrix instead."
+            f"Cell is skewed: MPMC's automatic cutoff ({mpmc_auto:.2f} Å, half "
+            f"the shortest lattice vector) is larger than the minimum-image "
+            f"limit ({max_cutoff:.2f} Å), so some pairs would be missed. Set "
+            f"pbc_cutoff ≤ {max_cutoff:.2f} in mpmc.inp."
         )
 
     # Sorbate placement overlap
@@ -195,7 +205,8 @@ def generate_isotherm(
         sx, sy, sz = sorbate_pos
 
     sorbate_lines = format_sorbate_pqr(
-        sorbate_model, sx, sy, sz, mol_id=2, start_atom_id=len(mol.atoms) + 1,
+        sorbate_model, sx, sy, sz, mol_id=2 + mpmc_movable_count(mol),
+        start_atom_id=len(mol.atoms) + 1,
     )
 
     template = load_template("mpmc_uvt.inp")

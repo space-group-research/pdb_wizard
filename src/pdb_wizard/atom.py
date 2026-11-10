@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 from pdb_wizard.constants import DEFAULT_ELEMENT, ELEMENTS, Element
@@ -11,6 +13,7 @@ class Atom:
     __slots__ = (
         "name", "_element", "x", "charge", "alpha", "epsilon",
         "sigma", "c6", "c8", "c10", "id",
+        "mpmc_flag", "mpmc_mol", "mpmc_res", "file_mass",
     )
 
     _element_cache: dict[str, "Element"] = {}
@@ -38,6 +41,12 @@ class Atom:
         self.c8 = 0.0
         self.c10 = 0.0
         self.id = 0
+        # Set only when read from an MPMC file: F/M flag, molecule ID, residue
+        # name and the mass column (dummy sites like M or LP are massless).
+        self.mpmc_flag: Optional[str] = None
+        self.mpmc_mol: Optional[int] = None
+        self.mpmc_res: Optional[str] = None
+        self.file_mass: Optional[float] = None
 
     @property
     def element(self) -> Element:

@@ -228,7 +228,14 @@ def compute_qeq_charges(
 
 
 def apply_qeq_charges(mol: Molecule, progress_callback=None) -> None:
-    """Compute and apply QEq charges to all atoms in the molecule."""
+    """Compute and apply QEq charges to the framework atoms.
+
+    Movable (M) molecules read from an MPMC file keep their model charges and
+    are left out of the equalization.
+    """
+    framework = [a for a in mol.atoms if a.mpmc_flag != "M"]
+    if len(framework) != len(mol.atoms):
+        mol = Molecule(atoms=framework, pbc=mol.pbc)
     charges = compute_qeq_charges(mol, progress_callback=progress_callback)
     for i, atom in enumerate(mol.atoms):
         atom.charge = float(charges[i])

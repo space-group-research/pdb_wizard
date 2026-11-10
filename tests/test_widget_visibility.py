@@ -393,14 +393,14 @@ class TestHkust1Visibility:
             app.push_screen(ExtendAxisModal(mol.pbc))
             await pilot.pause()
             for sid in ("extend-na", "extend-nb", "extend-nc"):
-                app.screen.query_one(f"#{sid}", SpinBox)._update(20)
+                app.screen.query_one(f"#{sid}", SpinBox)._update(19)  # the max: 19 extra copies
             await pilot.pause()
             rows = _render_text_grid(app)
             joined = "\n".join(rows)
-            # Each axis should clearly show "20" in its dedicated row
-            assert joined.count("20") >= 3, (
+            # Each axis should clearly show "19" in its dedicated row
+            assert joined.count("19") >= 3, (
                 f"At least one of the 3 axis SpinBoxes is hiding its value: "
-                f"only {joined.count('20')} occurrences of '20' in render"
+                f"only {joined.count('19')} occurrences of '19' in render"
             )
 
     @pytest.mark.asyncio

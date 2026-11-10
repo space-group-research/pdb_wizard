@@ -21,8 +21,10 @@ from pdb_wizard.geometry import (
     remove_lone_atoms,
 )
 from pdb_wizard.io import (
+    assign_framework_charges,
     check_pdb_trajectory,
     check_xyz_trajectory,
+    mpmc_movable_count,
     read_charges_file,
     read_pdb,
     read_pdb_trajectory,
@@ -40,6 +42,12 @@ from pdb_wizard.operations import (
     wrap_atoms,
 )
 from pdb_wizard.pbc import PBC
+from pdb_wizard.sorbates import (
+    SORBATE_MODELS,
+    format_inserted_sorbates,
+    insert_sorbates,
+    read_sorbate_template,
+)
 
 
 def _list_coords(mol: Molecule) -> None:
@@ -156,15 +164,9 @@ def _write_mpmc_options(mol: Molecule) -> None:
             )
             try:
                 charges = read_charges_file(charges_filename)
-                n = len(mol.atoms)
-                if len(charges) == n:
-                    for ind, atom in enumerate(mol.atoms):
-                        atom.charge = charges[ind]
-                elif n % len(charges) == 0:
-                    for ind, atom in enumerate(mol.atoms):
-                        atom.charge = charges[ind % len(charges)]
-                else:
-                    raise ValueError
+                problem = assign_framework_charges(mol, charges)
+                if problem:
+                    raise ValueError(problem)
                 break
             except (TypeError, ValueError, FileNotFoundError) as e:
                 print(f"!!! Error reading charges: {e} !!!")
@@ -303,7 +305,8 @@ def _main_loop_single(mol: Molecule, filename: str) -> None:
                 "6 = write .xyz\n"
                 "7 = write MPMC .pdb\n"
                 "8 = write standardized .pdb\n"
-                "9 = quit\n\n> "
+                "9 = quit\n"
+                "10 = insert sorbates and write MPMC .pdb\n\n> "
             ))
         except ValueError:
             print("!!! Error converting input to int !!!")
@@ -336,8 +339,57 @@ def _main_loop_single(mol: Molecule, filename: str) -> None:
             print(f"wrote {out_filename}")
         elif option == 9:
             break
+        elif option == 10:
+            _menu_insert_sorbates(mol)
         else:
             print("\nInvalid option!")
+
+
+def _menu_insert_sorbates(mol: Molecule) -> None:
+    """Classic-menu flow: pick a model, pack N copies (or fill), write MPMC .pdb."""
+    if mol.pbc is None:
+        print("\n!!! Inserting sorbates needs a unit cell (update cell dimensions first) !!!")
+        return
+    names = list(SORBATE_MODELS)
+    print("\nSorbate models:")
+    for i, name in enumerate(names):
+        print(f"{i:>3} = {name:<14} {SORBATE_MODELS[name].description}")
+    while True:
+        choice = input("\nModel number or name, or a path to an MPMC .pqr template "
+                       "(q to cancel)\n\n> ").strip()
+        if choice.lower() in ("q", "quit"):
+            return
+        try:
+            if choice.isdigit() and int(choice) < len(names):
+                model = SORBATE_MODELS[names[int(choice)]]
+            elif choice in SORBATE_MODELS:
+                model = SORBATE_MODELS[choice]
+            else:
+                model = read_sorbate_template(choice)
+            break
+        except (OSError, ValueError) as e:
+            print(f"!!! {e} !!!")
+    while True:
+        raw = input("\nHow many molecules? (a number, or 'fill' to pack until "
+                    "nothing else fits)\n\n> ").strip().lower()
+        if raw == "fill":
+            n = None
+            break
+        if raw.isdigit() and int(raw) > 0:
+            n = int(raw)
+            break
+        print("!!! Enter a positive number or 'fill' !!!")
+    placed = insert_sorbates(mol, model, n,
+                             progress_callback=lambda k: print(f"\rplaced {k}", end=""))
+    print(f"\nPlaced {len(placed)} {model.label}"
+          + (f" (asked for {n}; the cell is full)" if n is not None and len(placed) < n else ""))
+    if not placed:
+        return
+    lines = format_inserted_sorbates(model, placed, start_atom_id=len(mol.atoms) + 1,
+                                     start_mol_id=2 + mpmc_movable_count(mol))
+    filename = input("\noutput filename > ")
+    write_mpmc_pdb(mol, filename, sorbate_lines=lines)
+    print(f"\nwrote {filename}\n")
 
 
 def _main_loop_movie(molecules: list[Molecule], filename: str) -> None:

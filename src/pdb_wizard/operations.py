@@ -93,10 +93,14 @@ def extend_axis(mol: Molecule, axis: int, times: int) -> Molecule:
         return mol
     pbc = mol.pbc
     new_atoms: list[Atom] = []
+    mol_ids = [a.mpmc_mol for a in mol.atoms if a.mpmc_flag == "M" and a.mpmc_mol is not None]
+    id_step = max(mol_ids, default=0)
     for i in range(1, times + 1):
         for atom in mol.atoms:
             new_atom = copy.deepcopy(atom)
             new_atom.x = atom.x + i * pbc.basis_matrix[axis]
+            if new_atom.mpmc_flag == "M" and new_atom.mpmc_mol is not None:
+                new_atom.mpmc_mol += i * id_step  # each copy is its own molecule
             new_atoms.append(new_atom)
     mol.atoms.extend(new_atoms)
 

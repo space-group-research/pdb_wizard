@@ -615,7 +615,8 @@ class SpinBox(Widget, can_focus=True):
 
 
 class ExtendAxisModal(ModalScreen[tuple]):
-    """Modal to extend all three axes at once. Returns (na, nb, nc) multipliers."""
+    """Modal to extend all three axes at once. Returns (na, nb, nc), the number
+    of extra copies per axis, matching the classic menu's "How many times"."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel"), Binding("q", "cancel", "Close")]
     DEFAULT_CSS = """
@@ -680,16 +681,16 @@ class ExtendAxisModal(ModalScreen[tuple]):
             yield Label("Extend Supercell", classes="title")
             if sub:
                 yield Label(sub)
-            yield Label("Multipliers (final cell = original x multiplier):")
+            yield Label("Times to extend each axis (1 doubles it, as in the classic menu):")
             with Horizontal(classes="axis-row"):
                 yield Label("a:", classes="axis-label")
-                yield SpinBox(value=1, min_val=1, max_val=20, id="extend-na")
+                yield SpinBox(value=0, min_val=0, max_val=19, id="extend-na")
             with Horizontal(classes="axis-row"):
                 yield Label("b:", classes="axis-label")
-                yield SpinBox(value=1, min_val=1, max_val=20, id="extend-nb")
+                yield SpinBox(value=0, min_val=0, max_val=19, id="extend-nb")
             with Horizontal(classes="axis-row"):
                 yield Label("c:", classes="axis-label")
-                yield SpinBox(value=1, min_val=1, max_val=20, id="extend-nc")
+                yield SpinBox(value=0, min_val=0, max_val=19, id="extend-nc")
             with Horizontal():
                 yield Button("Extend", id="extend-ok", variant="primary")
                 yield Button("Cancel", id="extend-cancel")
@@ -755,7 +756,7 @@ class SorbateModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("Insert Sorbate Molecule", classes="title")
-            yield Label("Select a sorbate to place at the center of the unit cell:")
+            yield Label("Select a sorbate to insert (you choose how many next):")
             yield DataTable(id="sorbate-table", cursor_type="row")
             with Horizontal():
                 yield Button("Insert", id="sorb-ok", variant="primary")
@@ -6198,30 +6199,32 @@ class PdbWizardApp(App):
         if not value or len(value) != 3:
             return
         na, nb, nc = value
-        if na == 1 and nb == 1 and nc == 1:
+        if na == 0 and nb == 0 and nc == 0:
             return  # no-op
         self._track_task(self._do_extend_async(na, nb, nc))
 
     async def _do_extend_async(self, na: int, nb: int, nc: int) -> None:
+        """Add na, nb, nc extra copies along a, b, c (classic-menu counting)."""
+        size = f"{na + 1}x{nb + 1}x{nc + 1}"
         self._save_undo()
         from pdb_wizard.operations import extend_axis
-        self._show_progress(f"Extending {na}x{nb}x{nc}...")
+        self._show_progress(f"Extending to {size}...")
         await asyncio.sleep(0)
 
         def _extend_all(mol):
             # All three axes inside one thread — main loop only sees the
             # final state, never the intermediate (renderer doesn't render
             # the partial 2x1x1 / 2x2x1 frames).
-            if na > 1:
-                extend_axis(mol, 0, na - 1)
-            if nb > 1:
-                extend_axis(mol, 1, nb - 1)
-            if nc > 1:
-                extend_axis(mol, 2, nc - 1)
+            if na > 0:
+                extend_axis(mol, 0, na)
+            if nb > 0:
+                extend_axis(mol, 1, nb)
+            if nc > 0:
+                extend_axis(mol, 2, nc)
             return mol
 
         await asyncio.to_thread(_extend_all, self.molecule)
-        await self._refresh_molecule(f"Extended to {na}x{nb}x{nc}")
+        await self._refresh_molecule(f"Extended to {size}")
 
     def _confirm_overwrite(self, filepath: str, callback) -> None:
         """If filepath exists, prompt to overwrite. Otherwise call callback directly."""
@@ -6613,7 +6616,7 @@ class PdbWizardApp(App):
         else:
             # Existing charges stay until a new source actually succeeds, so
             # cancelling the next step doesn't leave the system with all-zero
-            # charges. Both the file loader and QEq overwrite every atom.
+            # charges. Both the file loader and QEq overwrite every framework atom.
             self._mpmc_step_charge_source()
 
     def _mpmc_step_charge_source(self) -> None:
@@ -6666,30 +6669,23 @@ class PdbWizardApp(App):
             return  # cancelled
         mol = self.molecule
         try:
-            from pdb_wizard.io import read_charges_file
+            from pdb_wizard.io import assign_framework_charges, read_charges_file
             charges = read_charges_file(
                 result["path"],
                 skip_first=result.get("skip_first", 0),
                 skip_last=result.get("skip_last", 0),
             )
 
-            n = len(mol.atoms)
-            if len(charges) == n:
-                for ind, atom in enumerate(mol.atoms):
-                    atom.charge = charges[ind]
-            elif len(charges) > 0 and n % len(charges) == 0:
-                for ind, atom in enumerate(mol.atoms):
-                    atom.charge = charges[ind % len(charges)]
+            n = sum(1 for a in mol.atoms if a.mpmc_flag != "M")
+            problem = assign_framework_charges(mol, charges)
+            if problem:
+                self.notify(problem, timeout=5)
+                return
+            if len(charges) != n:
                 self.notify(
                     f"Applied {len(charges)} charges recursively "
                     f"({n // len(charges)}x)", timeout=3,
                 )
-            else:
-                self.notify(
-                    f"Charge count ({len(charges)}) doesn't match "
-                    f"atom count ({n})", timeout=5,
-                )
-                return
             self.notify(f"Loaded {len(charges)} charges", timeout=2)
         except (OSError, ValueError) as e:
             self.notify(f"Error reading charges: {e}", timeout=5)
@@ -6732,11 +6728,35 @@ class PdbWizardApp(App):
         if model_name is None:
             return  # Cancel: abort the MPMC export
         self._mpmc_state["sorbate"] = model_name if model_name else None
+        self._mpmc_state["sorbate_n"] = 1
+        if not model_name:
+            self._mpmc_step_filename()
+            return
+        self.push_screen(
+            InputModal("How many molecules?", default="1",
+                       hint="A number, or 'fill' to pack until nothing else fits. "
+                            "Positions and orientations are random, with no overlaps "
+                            "(minimum image in the real cell)."),
+            callback=self._mpmc_step_sorbate_count,
+        )
+
+    def _mpmc_step_sorbate_count(self, value: str | None) -> None:
+        if not value or not value.strip():
+            return  # Cancel / Escape (InputModal returns ""): abort the MPMC export
+        raw = value.strip().lower()
+        if raw == "fill":
+            self._mpmc_state["sorbate_n"] = None
+        elif raw.isdigit() and int(raw) > 0:
+            self._mpmc_state["sorbate_n"] = int(raw)
+        else:
+            self.notify("Enter a positive number or 'fill'", severity="warning")
+            self._mpmc_step_sorbate_result(self._mpmc_state["sorbate"])
+            return
         self._mpmc_step_filename()
 
     def _mpmc_step_filename(self) -> None:
         stem = Path(self.filepath).stem
-        default = str(Path(self.filepath).parent / f"{stem}_out_mpmc.pdb")
+        default = str(Path(self.filepath).parent / f"{stem}_out_mpmc.pqr")
         self.push_screen(
             FileSaveModal("Save MPMC PDB as:", default=default),
             callback=self._mpmc_step_write,
@@ -6754,13 +6774,20 @@ class PdbWizardApp(App):
         sorbate_lines = None
         sorbate_name = self._mpmc_state.get("sorbate")
         if sorbate_name:
-            from pdb_wizard.sorbates import format_sorbate_pqr
+            from pdb_wizard.io import mpmc_movable_count
+            from pdb_wizard.sorbates import format_inserted_sorbates, insert_sorbates
             mol = self.molecule
-            center = _find_nonoverlap_position(mol)
-            n_atoms = len(mol.atoms)
-            sorbate_lines = format_sorbate_pqr(
-                sorbate_name, center[0], center[1], center[2],
-                mol_id=2, start_atom_id=n_atoms + 1,
+            n_want = self._mpmc_state.get("sorbate_n", 1)
+            placed = insert_sorbates(mol, sorbate_name, n_want)
+            if not placed:
+                self.notify("No room for even one molecule; nothing written",
+                            severity="error")
+                return
+            if n_want is None or len(placed) < n_want:
+                self.notify(f"Placed {len(placed)} molecules (cell full)", timeout=5)
+            sorbate_lines = format_inserted_sorbates(
+                sorbate_name, placed, start_atom_id=len(mol.atoms) + 1,
+                start_mol_id=2 + mpmc_movable_count(mol),
             )
 
         self._write_text_file(

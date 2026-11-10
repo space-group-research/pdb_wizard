@@ -42,6 +42,7 @@ EXPECTED_MAIN = [
     (7, "write MPMC .pdb"),
     (8, "write standardized .pdb"),
     (9, "quit"),
+    (10, "insert sorbates and write MPMC .pdb"),
 ]
 
 EXPECTED_GEOM = [
