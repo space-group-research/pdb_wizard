@@ -2,7 +2,7 @@
 name = "pdb-wizard"
 version = "0.5.0"
 description = "Molecular structure processor and interactive 3D terminal viewer"
-readme = {text = "", content-type = "text/plain"}
+readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.7"
 authors = [
@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 viewer = ["textual>=3.0"]
-test = ["pytest>=7.0", "pytest-cov"]
+test = ["pytest>=7.0", "pytest-cov", "pytest-asyncio", "pytest-xdist", "hypothesis", "python-minifier"]
 
 [project.scripts]
 pdb_wizard = "pdb_wizard.__main__:main"
