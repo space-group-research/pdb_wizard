@@ -286,3 +286,61 @@ def edit_h_dist(mol: Molecule, second_element: str, distance: float) -> Molecule
     """Adjust X-H distances, returning only the molecule (see adjust_h_distances)."""
     mol, _ = adjust_h_distances(mol, second_element, distance)
     return mol
+
+
+# Metals that get coordination polyhedra in the viewers.
+POLYHEDRON_METALS = frozenset({
+    "Li", "Be", "Na", "Mg", "Al", "K", "Ca", "Sc", "Ti", "V",
+    "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Rb", "Sr",
+    "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
+    "Sn", "Cs", "Ba", "La", "Ce", "Hf", "Ta", "W", "Re", "Os",
+    "Ir", "Pt", "Au", "Pb", "Bi",
+})
+
+
+def water_atom_indices(mol: Molecule) -> set[int]:
+    """Indices of water molecules' atoms: an O bonded to exactly two H and nothing else.
+
+    Uses ``mol.bonds`` as they are (call ``detect_bonds`` first).
+    """
+    neighbors: dict[int, list[int]] = {}
+    for a, b in mol.bonds or []:
+        neighbors.setdefault(a, []).append(b)
+        neighbors.setdefault(b, []).append(a)
+    water: set[int] = set()
+    for i, atom in enumerate(mol.atoms):
+        if atom.element.symbol != "O":
+            continue
+        nbrs = neighbors.get(i, [])
+        h_nbrs = [j for j in nbrs if mol.atoms[j].element.symbol == "H"]
+        if len(h_nbrs) == 2 and len(nbrs) == 2:
+            water.add(i)
+            water.update(h_nbrs)
+    return water
+
+
+def coordination_polyhedra(atoms: list, pbc=None) -> list[tuple[int, np.ndarray]]:
+    """(metal index, neighbour positions) for each metal with three or more neighbours.
+
+    Neighbours are within 2.5 covalent radii + 0.5 Å of the metal and placed at their
+    minimum image around it, so a metal near a cell face gets a whole polyhedron.
+    """
+    if not atoms:
+        return []
+    positions = np.array([a.position for a in atoms])
+    out = []
+    for ci, atom in enumerate(atoms):
+        if atom.element.symbol not in POLYHEDRON_METALS:
+            continue
+        cutoff = atom.element.covalent_radius * 2.5 + 0.5
+        diff = positions - positions[ci]
+        if pbc is not None:
+            frac = diff @ pbc.reciprocal_basis_matrix
+            frac -= np.round(frac)
+            diff = frac @ pbc.basis_matrix
+        d = np.linalg.norm(diff, axis=1)
+        near = np.where(d < cutoff)[0]
+        near = near[near != ci]
+        if len(near) >= 3:
+            out.append((ci, positions[ci] + diff[near]))
+    return out

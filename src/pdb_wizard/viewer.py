@@ -715,7 +715,17 @@ class ExtendAxisModal(ModalScreen[tuple]):
 
 
 class SorbateModal(ModalScreen[Optional[str]]):
-    """Modal to select a sorbate molecule to insert into the MPMC PDB."""
+    """Modal to select a sorbate molecule to insert into the MPMC PDB.
+
+    ``standalone`` (Edit > Pack Sorbates) swaps Skip for "From .pqr file", which
+    dismisses with ``FROM_FILE``.
+    """
+
+    FROM_FILE = "__file__"
+
+    def __init__(self, standalone: bool = False) -> None:
+        super().__init__()
+        self._standalone = standalone
 
     BINDINGS = [Binding("escape", "cancel", "Cancel"), Binding("q", "cancel", "Close")]
     DEFAULT_CSS = """
@@ -760,7 +770,10 @@ class SorbateModal(ModalScreen[Optional[str]]):
             yield DataTable(id="sorbate-table", cursor_type="row")
             with Horizontal():
                 yield Button("Insert", id="sorb-ok", variant="primary")
-                yield Button("Skip", id="sorb-skip")
+                if self._standalone:
+                    yield Button("From .pqr file", id="sorb-file")
+                else:
+                    yield Button("Skip", id="sorb-skip")
                 yield Button("Cancel", id="sorb-cancel")
 
     def on_mount(self) -> None:
@@ -793,6 +806,8 @@ class SorbateModal(ModalScreen[Optional[str]]):
             self.dismiss("")
         elif event.button.id == "sorb-skip":
             self.dismiss("")  # Skip: no sorbate, but continue the flow
+        elif event.button.id == "sorb-file":
+            self.dismiss(self.FROM_FILE)
         else:
             self.dismiss(None)  # Cancel: abort the whole flow
 
@@ -1226,15 +1241,18 @@ class _AnalysisScreen(ModalScreen[None]):
 
     def _get_frame_slice(self) -> list:
         """Get frame range from Start/End SpinBoxes if present."""
-        frames = self._frames
-        if frames and len(frames) > 1:
+        from pdb_wizard.analyses import frame_slice
+        return frame_slice(self._frames, *self._frame_range())
+
+    def _frame_range(self) -> tuple:
+        """(start, end), 1-based inclusive, from the Start/End SpinBoxes; (1, None) without."""
+        if self._frames and len(self._frames) > 1:
             try:
-                start = self.query_one(f"#{self._prefix}-start", SpinBox).value - 1
-                end = self.query_one(f"#{self._prefix}-end", SpinBox).value
-                frames = frames[start:end]
+                return (self.query_one(f"#{self._prefix}-start", SpinBox).value,
+                        self.query_one(f"#{self._prefix}-end", SpinBox).value)
             except Exception:
                 pass
-        return frames
+        return 1, None
 
     def _yield_frame_range(self, prefix: str = "") -> ComposeResult:
         """Yield Start/End SpinBox widgets for frame range selection."""
@@ -1261,14 +1279,12 @@ class _AnalysisScreen(ModalScreen[None]):
 
     def _do_export_csv(self, filepath: str, header: str, *arrays) -> None:
         """Write CSV with header and parallel arrays."""
+        from pdb_wizard.analyses import write_csv
         if not filepath.strip():
             return
         path = filepath.strip()
         try:
-            with open(path, "w") as f:
-                f.write(header + "\n")
-                for row in zip(*arrays):
-                    f.write(",".join(f"{v:.6f}" for v in row) + "\n")
+            write_csv(path, header, *arrays)
         except OSError as e:
             # Raised inside a modal dismiss callback: an uncaught error here
             # would take down the whole app.
@@ -1402,13 +1418,12 @@ class RdfScreen(_AnalysisScreen):
             return lambda a: a.element.symbol == el and a.name.strip() == name
 
     async def _compute_rdf_async(self) -> None:
-        filter1 = self._get_atom_filter("rdf-el1", "rdf-name1")
-        filter2 = self._get_atom_filter("rdf-el2", "rdf-name2")
+        from pdb_wizard.analyses import run_rdf
 
-        el1 = self.query_one("#rdf-el1", Select).value
-        el2 = self.query_one("#rdf-el2", Select).value
-        name1 = self.query_one("#rdf-name1", Select).value
-        name2 = self.query_one("#rdf-name2", Select).value
+        el1 = str(self.query_one("#rdf-el1", Select).value)
+        el2 = str(self.query_one("#rdf-el2", Select).value)
+        name1 = str(self.query_one("#rdf-name1", Select).value)
+        name2 = str(self.query_one("#rdf-name2", Select).value)
         label1 = el1 if name1 == "(all)" else name1
         label2 = el2 if name2 == "(all)" else name2
 
@@ -1417,18 +1432,15 @@ class RdfScreen(_AnalysisScreen):
         n_bins = self.query_one("#rdf-bins", SpinBox).value
 
         use_traj = False
-        start_frame = 0
-        end_frame = 0
         try:
-            use_traj = self.query_one("#rdf-traj", Checkbox).value and self._frames and len(self._frames) > 1
-            if use_traj:
-                start_frame = self.query_one("#rdf-start", SpinBox).value - 1  # 0-indexed
-                end_frame = self.query_one("#rdf-end", SpinBox).value  # exclusive
+            use_traj = bool(self.query_one("#rdf-traj", Checkbox).value
+                            and self._frames and len(self._frames) > 1)
         except Exception:
             pass
+        start, end = self._frame_range() if use_traj else (1, None)
 
         status = self.query_one("#rdf-status", Label)
-        n_total = (end_frame - start_frame) if use_traj else 1
+        n_total = (end - start + 1) if use_traj else 1
 
         # Shared progress state polled by a timer
         self._rdf_progress = [0.0]
@@ -1449,118 +1461,25 @@ class RdfScreen(_AnalysisScreen):
         await asyncio.sleep(0)
 
         try:
-            if use_traj:
-                frames_slice = self._frames[start_frame:end_frame]
-                r, g = await asyncio.to_thread(
-                    self._rdf_filtered_traj_frames, frames_slice, filter1, filter2, _prog,
-                    x_max, n_bins,
-                )
-                title = f"g(r) {label1}-{label2} (frames {start_frame+1}-{end_frame})"
-            else:
-                r, g = await asyncio.to_thread(
-                    self._rdf_filtered, self._molecule, filter1, filter2, _prog, x_max, n_bins,
-                )
-                title = f"g(r) {label1}-{label2}"
+            res = await asyncio.to_thread(
+                run_rdf, self._molecule, el1, el2, name1, name2, x_max, n_bins,
+                self._frames, start, end, use_traj, _prog,
+            )
         finally:
             poll_timer.stop()
 
-        if len(r) == 0:
-            status.update(f"No {label1}-{label2} pairs found")
+        if res.empty:
+            status.update(res.summary)
             return
 
         # Store for CSV export
-        self._last_r = r
-        self._last_g = g
-        self._last_title = title
+        self._last_r = res.x
+        self._last_g = res.y
+        self._last_title = res.title
 
         plot = self.query_one("#rdf-plot", PlotWidget)
-        plot.set_data(r, g, title=title, x_label="r (A)", y_min=0.0, y_max=y_max)
-        peak_r = r[g.argmax()]
-        status.update(
-            f"max g(r) = {g.max():.2f} at r = {peak_r:.2f} A"
-        )
-
-    @staticmethod
-    def _rdf_filtered(mol, filter1, filter2, progress_callback=None, r_max=None, n_bins=200):
-        """Compute RDF with arbitrary atom filters (fully vectorized)."""
-        if mol.pbc is None:
-            return np.array([]), np.array([])
-        pbc = mol.pbc
-        if r_max is None:
-            r_max = min(pbc.a, pbc.b, pbc.c) / 2.0
-        dr = r_max / n_bins
-
-        idx1 = np.array([i for i, a in enumerate(mol.atoms) if filter1(a)])
-        idx2 = np.array([i for i, a in enumerate(mol.atoms) if filter2(a)])
-        if len(idx1) == 0 or len(idx2) == 0:
-            return np.array([]), np.array([])
-
-        coords = np.array([a.x for a in mol.atoms])
-        hist = np.zeros(n_bins)
-        same = np.array_equal(np.sort(idx1), np.sort(idx2))
-
-        if same:
-            # Self-correlation: use upper triangle
-            pairs_i, pairs_j = np.triu_indices(len(idx1), k=1)
-            all_i = idx1[pairs_i]
-            all_j = idx1[pairs_j]
-        else:
-            # Cross-correlation: all i x j pairs
-            grid_i, grid_j = np.meshgrid(idx1, idx2, indexing="ij")
-            all_i = grid_i.ravel()
-            all_j = grid_j.ravel()
-
-        # Chunk to avoid memory explosion on huge pair counts
-        total_pairs = len(all_i)
-        chunk_size = max(200000, total_pairs // 20)
-
-        for start in range(0, total_pairs, chunk_size):
-            end = min(start + chunk_size, total_pairs)
-            dx = coords[all_i[start:end]] - coords[all_j[start:end]]
-            frac = dx @ pbc.reciprocal_basis_matrix
-            wrapped = dx - np.round(frac) @ pbc.basis_matrix
-            dists = np.linalg.norm(wrapped, axis=1)
-            valid = dists < r_max
-            bins = (dists[valid] / dr).astype(int)
-            bins = bins[(bins >= 0) & (bins < n_bins)]
-            np.add.at(hist, bins, 1)
-            if progress_callback:
-                progress_callback(end / total_pairs)
-
-        r_values = (np.arange(n_bins) + 0.5) * dr
-        n1, n2 = len(idx1), len(idx2)
-        rho = n2 / pbc.volume
-        shell_vol = 4.0 * np.pi * r_values**2 * dr
-        ideal = rho * shell_vol
-        g_r = np.zeros(n_bins)
-        nonzero = ideal > 0
-        g_r[nonzero] = hist[nonzero] / (n1 * ideal[nonzero])
-        return r_values, g_r
-
-    @staticmethod
-    def _rdf_filtered_traj_frames(frames, filter1, filter2, progress_callback=None, r_max=None, n_bins=200):
-        g_sum = None
-        r_values = None
-        n = len(frames)
-        for fi, mol in enumerate(frames):
-            def _sub_prog(frac, _fi=fi):
-                if progress_callback:
-                    progress_callback((_fi + frac) / n)
-
-            r, g = RdfScreen._rdf_filtered(mol, filter1, filter2, _sub_prog, r_max, n_bins)
-            if len(r) == 0:
-                continue
-            if g_sum is None:
-                g_sum = g.copy()
-                r_values = r
-            else:
-                g_sum += g
-        if progress_callback:
-            progress_callback(1.0)
-        if g_sum is None:
-            return np.array([]), np.array([])
-        return r_values, g_sum / n
-
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0, y_max=y_max)
+        status.update(res.summary)
 
 class MsdScreen(_AnalysisScreen):
     """MSD analysis with element selector, frame range, and diffusion constant."""
@@ -1611,33 +1530,22 @@ class MsdScreen(_AnalysisScreen):
             self.app.push_screen(FileSaveModal("Save MSD as CSV:", default="msd.csv"), callback=self._export_csv)
 
     async def _run_msd(self) -> None:
-        from pdb_wizard.msd import compute_diffusion_constant, compute_msd
+        from pdb_wizard.analyses import run_msd
         el = str(self.query_one("#msd-el", Select).value)
         name = str(self.query_one("#msd-name", Select).value)
-        name_filter = name if name != "(all)" else None
         dt = float(self.query_one("#msd-dt", SpinBox).value)
-        frames = self._get_frame_slice()
-
         status = self.query_one("#msd-status", Label)
         status.update(f"Computing MSD for {el}...")
         await asyncio.sleep(0)
-        lags, msd_vals = await asyncio.to_thread(
-            compute_msd, frames, element=el, name=name_filter,
-        )
-        if len(lags) == 0:
-            status.update(f"No {el} atoms found")
+        res = await asyncio.to_thread(run_msd, self._frames, el, name, dt, *self._frame_range())
+        if res.empty:
+            status.update(res.summary)
             return
-        self._last_lags = lags
-        self._last_msd = msd_vals
+        self._last_lags, self._last_msd = res.csv_arrays()
         plot = self.query_one("#msd-plot", PlotWidget)
-        y_max = float(msd_vals.max()) * 1.1 if msd_vals.max() > 0 else 1.0
-        label = el if not name_filter else name_filter
-        plot.set_data(lags * dt, msd_vals, title=f"MSD {label}", x_label="time (ps)", y_min=0.0, y_max=y_max)
-        if len(lags) > 10:
-            D, slope = compute_diffusion_constant(lags, msd_vals, dt=dt)
-            status.update(f"D = {D:.4e} cm^2/s  (slope = {slope:.4f} A^2/ps)")
-        else:
-            status.update("Done")
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0,
+                      y_max=res.y_max)
+        status.update(res.summary)
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "lag_frames,msd_A2", self._last_lags, self._last_msd)
@@ -1690,42 +1598,37 @@ class CoordinationScreen(_AnalysisScreen):
             self.app.push_screen(FileSaveModal("Save coordination as CSV:", default="coordination.csv"), callback=self._export_csv)
 
     async def _run_coord(self) -> None:
-        from pdb_wizard.coordination import compute_coordination, compute_coordination_trajectory
+        from pdb_wizard.analyses import run_coordination
         el1 = str(self.query_one("#coord-el1", Select).value)
         el2 = str(self.query_one("#coord-el2", Select).value)
         r_max = float(self.query_one("#coord-rmax", SpinBox).value)
         status = self.query_one("#coord-status", Label)
-
         use_traj = False
         try:
-            use_traj = self.query_one("#coord-traj", Checkbox).value and self._frames and len(self._frames) > 1
+            use_traj = bool(self.query_one("#coord-traj", Checkbox).value
+                            and self._frames and len(self._frames) > 1)
         except Exception:
             pass
-
         if use_traj:
-            frames = self._get_frame_slice()
-            status.update(f"Computing N({el2}) around {el1} over {len(frames)} frames...")
-            await asyncio.sleep(0)
-            r, cn, avg = await asyncio.to_thread(
-                compute_coordination_trajectory, frames, el1, el2, r_max,
-            )
+            start, end = self._frame_range()
+            n = len(self._get_frame_slice())
+            status.update(f"Computing N({el2}) around {el1} over {n} frames...")
         else:
+            start, end = 1, None
             status.update(f"Computing N({el2}) around {el1}...")
-            await asyncio.sleep(0)
-            r, cn, avg = await asyncio.to_thread(
-                compute_coordination, self._molecule, el1, el2, r_max,
-            )
-
-        if len(r) == 0:
-            status.update(f"No {el1} or {el2} atoms found")
+        await asyncio.sleep(0)
+        res = await asyncio.to_thread(
+            run_coordination, self._molecule, el1, el2, r_max, self._frames, start, end, use_traj,
+        )
+        if res.empty:
+            status.update(res.summary)
             return
-
-        self._last_r = r
-        self._last_cn = cn
+        self._last_r = res.x
+        self._last_cn = res.y
         plot = self.query_one("#coord-plot", PlotWidget)
-        y_max = float(cn.max()) * 1.1 if cn.max() > 0 else 1.0
-        plot.set_data(r, cn, title=f"N({el2}) around {el1}", x_label="r (A)", y_min=0.0, y_max=y_max)
-        status.update(f"Avg coordination at {r_max} A: {avg:.2f} {el2} per {el1}")
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0,
+                      y_max=res.y_max)
+        status.update(res.summary)
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "r_A,coordination_number", self._last_r, self._last_cn)
@@ -1780,32 +1683,22 @@ class RmsdScreen(_AnalysisScreen):
             self.app.push_screen(FileSaveModal("Save RMSD as CSV:", default="rmsd.csv"), callback=self._export_csv)
 
     async def _run_rmsd(self) -> None:
-        from pdb_wizard.rmsd import compute_rmsd
+        from pdb_wizard.analyses import run_rmsd
         el = str(self.query_one("#rmsd-el", Select).value)
-        el_filter = el if el != "(all)" else None
         name = str(self.query_one("#rmsd-name", Select).value)
-        name_filter = name if name != "(all)" else None
         dt = float(self.query_one("#rmsd-dt", SpinBox).value)
-        frames = self._get_frame_slice()
-
         status = self.query_one("#rmsd-status", Label)
-        label = el_filter or "all"
-        status.update(f"Computing RMSD for {label}...")
+        status.update(f"Computing RMSD for {el if el != '(all)' else 'all'}...")
         await asyncio.sleep(0)
-        idx, rmsd_vals = await asyncio.to_thread(
-            compute_rmsd, frames, element=el_filter, name=name_filter,
-        )
-        if len(idx) == 0:
-            status.update("No matching atoms found")
+        res = await asyncio.to_thread(run_rmsd, self._frames, el, name, dt, *self._frame_range())
+        if res.empty:
+            status.update(res.summary)
             return
-        self._last_idx = idx
-        self._last_rmsd = rmsd_vals
+        self._last_idx, self._last_rmsd = res.csv_arrays()
         plot = self.query_one("#rmsd-plot", PlotWidget)
-        time = idx * dt
-        y_max = float(rmsd_vals.max()) * 1.1 if rmsd_vals.max() > 0 else 1.0
-        plot.set_data(time, rmsd_vals, title=f"RMSD ({label})", x_label="time (ps)", y_min=0.0, y_max=y_max)
-        avg_rmsd = float(rmsd_vals[len(rmsd_vals)//2:].mean())
-        status.update(f"RMSD avg (2nd half) = {avg_rmsd:.3f} A  |  max = {rmsd_vals.max():.3f} A")
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0,
+                      y_max=res.y_max)
+        status.update(res.summary)
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "frame,rmsd_A", self._last_idx, self._last_rmsd)
@@ -1851,34 +1744,26 @@ class HbondScreen(_AnalysisScreen):
             self.app.push_screen(FileSaveModal("Save H-bonds as CSV:", default="hbonds.csv"), callback=self._export_csv)
 
     async def _run(self) -> None:
-        from pdb_wizard.hbonds import count_hbonds_trajectory, detect_hbonds
+        from pdb_wizard.analyses import run_hbonds
         cutoff = self.query_one("#hb-cutoff", SpinBox).value / 10.0
         angle = float(self.query_one("#hb-angle", SpinBox).value)
         status = self.query_one("#hb-status", Label)
-
         if self._frames and len(self._frames) > 1:
-            frames = self._get_frame_slice()
-            status.update(f"Counting H-bonds over {len(frames)} frames...")
-            await asyncio.sleep(0)
-            idx, counts = await asyncio.to_thread(count_hbonds_trajectory, frames, cutoff, angle)
+            status.update(f"Counting H-bonds over {len(self._get_frame_slice())} frames...")
         else:
             status.update("Detecting H-bonds...")
-            await asyncio.sleep(0)
-            hb = await asyncio.to_thread(detect_hbonds, self._molecule, cutoff, angle)
-            idx = np.array([0.0])
-            counts = np.array([float(len(hb))])
-
-        if len(idx) == 0:
-            status.update("No frames")
+        await asyncio.sleep(0)
+        res = await asyncio.to_thread(run_hbonds, self._molecule, cutoff, angle, self._frames,
+                                      *self._frame_range())
+        if res.empty:
+            status.update(res.summary)
             return
-
-        self._last_idx = idx
-        self._last_counts = counts
+        self._last_idx = res.x
+        self._last_counts = res.y
         plot = self.query_one("#hb-plot", PlotWidget)
-        y_max = float(counts.max()) * 1.1 if counts.max() > 0 else 1.0
-        plot.set_data(idx, counts, title="H-bonds vs frame", x_label="frame", y_min=0.0, y_max=y_max)
-        avg = float(counts.mean())
-        status.update(f"Avg: {avg:.1f} H-bonds/frame  |  max: {counts.max():.0f}  |  min: {counts.min():.0f}")
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0,
+                      y_max=res.y_max)
+        status.update(res.summary)
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "frame,hbond_count", self._last_idx, self._last_counts)
@@ -1923,29 +1808,21 @@ class GyrationScreen(_AnalysisScreen):
             self.app.push_screen(FileSaveModal("Save Rg as CSV:", default="rg.csv"), callback=self._export_csv)
 
     async def _run(self) -> None:
-        from pdb_wizard.gyration import compute_gyration_trajectory
+        from pdb_wizard.analyses import run_gyration
         el = str(self.query_one("#rg-el", Select).value)
-        el_filter = el if el != "(all)" else None
         dt = float(self.query_one("#rg-dt", SpinBox).value)
-        frames = self._get_frame_slice()
-
         status = self.query_one("#rg-status", Label)
-        label = el_filter or "all"
-        status.update(f"Computing Rg for {label}...")
+        status.update(f"Computing Rg for {el if el != '(all)' else 'all'}...")
         await asyncio.sleep(0)
-        idx, rg = await asyncio.to_thread(compute_gyration_trajectory, frames, el_filter)
-        if len(idx) == 0:
-            status.update("No data")
+        res = await asyncio.to_thread(run_gyration, self._frames, el, dt, *self._frame_range())
+        if res.empty:
+            status.update(res.summary)
             return
-        self._last_idx = idx
-        self._last_rg = rg
+        self._last_idx, self._last_rg = res.csv_arrays()
         plot = self.query_one("#rg-plot", PlotWidget)
-        time = idx * dt
-        y_max = float(rg.max()) * 1.1 if rg.max() > 0 else 1.0
-        y_min = float(rg.min()) * 0.9 if rg.min() > 0 else 0.0
-        plot.set_data(time, rg, title=f"Rg ({label})", x_label="time (ps)", y_min=y_min, y_max=y_max)
-        avg = float(rg.mean())
-        status.update(f"Avg Rg = {avg:.3f} A  |  std = {rg.std():.3f} A")
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=res.y_min,
+                      y_max=res.y_max)
+        status.update(res.summary)
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "frame,rg_A", self._last_idx, self._last_rg)
@@ -1988,6 +1865,7 @@ class ReduceCellScreen(ModalScreen[Optional[Molecule]]):
 
     def on_mount(self) -> None:
         table = self.query_one("#rc-table", DataTable)
+        table.cursor_type = "row"  # Enter / click toggles a whole row
         table.add_columns("Keep", "#", "Atoms", "Elements", "Center (A)")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -2027,7 +1905,8 @@ class ReduceCellScreen(ModalScreen[Optional[Molecule]]):
             elem_str = " ".join(f"{el}{n}" for el, n in sorted(elements.items()))
             center = np.mean(positions, axis=0) if positions else np.zeros(3)
             center_str = f"{center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}"
-            table.add_row("[X]", str(i + 1), str(len(mol_indices)), elem_str, center_str)
+            table.add_row("[X]", str(i + 1), str(len(mol_indices)), elem_str, center_str,
+                          key=str(i))
 
         status.update(status_msg + "  |  Click rows to toggle keep/discard, then Reduce")
 
@@ -2038,9 +1917,8 @@ class ReduceCellScreen(ModalScreen[Optional[Molecule]]):
         if 0 <= row_idx < len(self._keep):
             self._keep[row_idx] = not self._keep[row_idx]
             mark = "[X]" if self._keep[row_idx] else "[ ]"
-            # Update first cell
-            row_key = table.get_row_at(row_idx)
-            table.update_cell(row_key, table.columns[list(table.columns.keys())[0]].key, mark)
+            keep_column = next(iter(table.columns))
+            table.update_cell(event.row_key, keep_column, mark)
 
     def _do_reduce(self) -> None:
         if not self._framework_idx and not self._sorbate_mols:
@@ -2144,15 +2022,8 @@ class InputGeneratorScreen(ModalScreen[None]):
 
     def _default_outdir(self) -> str:
         """Folder name next to the loaded file (or cwd) for the current engine."""
-        base = Path(self._filepath).parent if self._filepath else Path(".")
-        folder_for = {
-            "mpmc_isotherm": "isotherm",
-            "cp2k_cell_opt": "cp2k_cell_opt",
-            "cp2k_dft_md": "cp2k_md",
-            "openmm_npt": "openmm_npt",
-            "openmm_nvt": "openmm_nvt",
-        }
-        return str(base / folder_for.get(self._engine_key, "sim_input"))
+        from pdb_wizard.inputgen import default_engine_outdir
+        return default_engine_outdir(self._filepath, self._engine_key)
 
     # ---------------------------------------------------------------
     # Mount + form building
@@ -2272,35 +2143,19 @@ class InputGeneratorScreen(ModalScreen[None]):
     # ---------------------------------------------------------------
     def _collect_values(self, *, strict: bool = True) -> dict:
         """Read each form widget back to its declared type."""
-        spec = self._engine_spec()
+        from pdb_wizard.inputgen import parse_form_value
         out: dict = {}
-        for var in spec.user_vars:
+        for var in self._engine_spec().user_vars:
             w = self._form_widgets.get(var.name)
             if w is None:
                 if strict:
                     raise KeyError(f"missing form widget for {var.name!r}")
                 continue
-            if var.kind == "int":
-                out[var.name] = int(w.value)  # SpinBox.value
-            elif var.kind == "float":
-                raw = str(w.value).strip()
-                if not raw:
-                    if strict:
-                        raise ValueError(f"{var.label} is empty")
-                    continue
-                out[var.name] = float(raw)
-            elif var.kind == "csv_floats":
-                raw = str(w.value)
-                parts = [p.strip() for p in raw.split(",") if p.strip()]
-                if not parts:
-                    if strict:
-                        raise ValueError(f"{var.label} is empty")
-                    continue
-                out[var.name] = [float(p) for p in parts]
-            elif var.kind == "select":
-                out[var.name] = str(w.value)
-            else:  # 'str'
-                out[var.name] = str(w.value)
+            try:
+                out[var.name] = parse_form_value(var, w.value)
+            except ValueError:
+                if strict:
+                    raise
         return out
 
     # ---------------------------------------------------------------
@@ -2322,224 +2177,47 @@ class InputGeneratorScreen(ModalScreen[None]):
     # MPMC validation
     # ---------------------------------------------------------------
     def _validate_mpmc(self) -> tuple[list[str], list[str]]:
-        from pdb_wizard.isotherm import validate_for_mpmc
-        return validate_for_mpmc(self._molecule)
+        from pdb_wizard.inputgen import validate_mpmc_inputs
+        return validate_mpmc_inputs(self._molecule)
 
     def _format_validation(self, errors: list[str], warnings: list[str]) -> str:
-        lines: list[str] = []
-        if not errors and not warnings:
-            lines.append("✓ All checks passed")
-            lines.append("")
-            lines.append("Charges, LJ params, box size, and sorbate placement all look fine.")
-            return "\n".join(lines)
-        if errors:
-            lines.append(f"✗ {len(errors)} error{'s' if len(errors) != 1 else ''} "
-                         f"(must fix before generating):")
-            lines.append("")
-            for e in errors:
-                lines.append(f"  ✗ {e}")
-            lines.append("")
-        if warnings:
-            lines.append(f"⚠ {len(warnings)} warning"
-                         f"{'s' if len(warnings) != 1 else ''} "
-                         f"(generation will proceed):")
-            lines.append("")
-            for w in warnings:
-                lines.append(f"  ⚠ {w}")
-        return "\n".join(lines)
+        from pdb_wizard.inputgen import format_validation
+        return format_validation(errors, warnings)
 
     def _show_validation(self) -> None:
-        if self._engine_key == "mpmc_isotherm":
-            errors, warnings = self._validate_mpmc()
-            self._set_preview(self._format_validation(errors, warnings))
-            if errors:
-                self._set_status(
-                    f"{len(errors)} error{'s' if len(errors) != 1 else ''} — "
-                    f"fix before Generate"
-                )
-            elif warnings:
-                self._set_status(
-                    f"{len(warnings)} warning{'s' if len(warnings) != 1 else ''} — "
-                    f"review then Generate"
-                )
-            else:
-                self._set_status("Ready to generate")
-        else:
-            # Light-weight check: PBC required for CP2K, NPT
-            problems: list[str] = []
-            if self._engine_key.startswith("cp2k") and self._molecule.pbc is None:
-                problems.append("CP2K requires a periodic box. Add one in Update Unit Cell.")
-            if self._engine_key == "openmm_npt" and self._molecule.pbc is None:
-                problems.append("OpenMM NPT requires a periodic box.")
-            if problems:
-                self._set_preview("✗ " + "\n✗ ".join(problems))
-                self._set_status("Fix issues before Generate")
-            else:
-                self._set_preview("✓ No engine-level problems detected.")
-                self._set_status("Ready to generate")
+        from pdb_wizard.inputgen import check_engine
+        self._show_outcome(check_engine(self._molecule, self._engine_key))
+
+    def _show_outcome(self, outcome) -> None:
+        if outcome.preview is not None:
+            self._set_preview(outcome.preview)
+        self._set_status(outcome.status)
 
     # ---------------------------------------------------------------
     # Show template
     # ---------------------------------------------------------------
     def _show_template(self) -> None:
-        from pdb_wizard.templates import load_template
-        try:
-            tpl = load_template(self._engine_spec().template_file)
-            self._set_preview(
-                f"-- {self._engine_spec().template_file} --\n\n{tpl}"
-            )
-            self._set_status(
-                f"Template: {self._engine_spec().template_file} "
-                f"(edit the file in src/pdb_wizard/templates/ to change defaults)"
-            )
-        except Exception as e:
-            self._set_status(f"Error loading template: {e}")
+        from pdb_wizard.inputgen import engine_template_text
+        self._show_outcome(engine_template_text(self._engine_key))
 
     # ---------------------------------------------------------------
     # Generate
     # ---------------------------------------------------------------
     def _do_generate(self) -> None:
+        from pdb_wizard.inputgen import generate_engine_inputs
         try:
             values = self._collect_values(strict=True)
         except (ValueError, KeyError) as e:
             self._set_status(f"Invalid input: {e}")
             return
-
         outdir = self.query_one("#gen-outdir", Input).value.strip()
-        if not outdir:
-            self._set_status("Output dir is required")
-            return
-
-        engine = self._engine_key
-        try:
-            if engine == "mpmc_isotherm":
-                self._generate_mpmc(values, outdir)
-            elif engine == "cp2k_cell_opt":
-                self._generate_cp2k(values, outdir, mode="cell_opt")
-            elif engine == "cp2k_dft_md":
-                self._generate_cp2k(values, outdir, mode="dft_md")
-            elif engine == "openmm_npt":
-                self._generate_openmm(values, outdir, ensemble="NPT")
-            elif engine == "openmm_nvt":
-                self._generate_openmm(values, outdir, ensemble="NVT")
-            else:
-                self._set_status(f"Unknown engine: {engine}")
-        except Exception as e:
-            self._set_status(f"Error: {e}")
-
-    def _generate_mpmc(self, values: dict, outdir: str) -> None:
-        from pdb_wizard.isotherm import generate_isotherm
-        # Refuse on validation errors (warnings are allowed)
-        errors, warnings = self._validate_mpmc()
-        if errors:
-            self._set_preview(self._format_validation(errors, warnings))
-            self._set_status(
-                f"Refusing: {len(errors)} error{'s' if len(errors) != 1 else ''} "
-                f"would produce a meaningless run"
-            )
+        outcome = generate_engine_inputs(self._molecule, self._engine_key, values, outdir)
+        self._show_outcome(outcome)
+        if outcome.status.startswith("Refusing"):
             self.app.notify(
                 "Cannot generate — fix errors shown in the preview",
                 severity="error", timeout=5,
             )
-            return
-
-        dirs = generate_isotherm(
-            self._molecule,
-            sorbate_model=values["sorbate"],
-            temperature=values["temperature"],
-            pressures=values["pressures"],
-            output_dir=outdir,
-            numsteps=values["numsteps"],
-            corrtime=values["corrtime"],
-            ensemble=values["ensemble"],
-            insert_probability=values["insert_probability"],
-            move_factor=values["move_factor"],
-            rot_factor=values["rot_factor"],
-        )
-
-        lines: list[str] = []
-        if warnings:
-            lines.append(f"⚠ Proceeded with {len(warnings)} warning"
-                         f"{'s' if len(warnings) != 1 else ''}:")
-            for w in warnings:
-                lines.append(f"  ⚠ {w}")
-            lines.append("")
-        lines.extend([
-            f"Generated {len(dirs)} pressure points:",
-            f"  Sorbate: {values['sorbate']}",
-            f"  Temperature: {values['temperature']} K",
-            f"  Steps: {values['numsteps']}",
-            "",
-            "Directories:",
-        ])
-        for d in dirs:
-            lines.append(f"  {d}/")
-            lines.append("    input.pqr, mpmc.inp, insert.pqr, run.sh")
-        lines.extend([
-            "",
-            f"Master script: {outdir}/run_all.sh",
-            "",
-            f"To run: cd {outdir} && bash run_all.sh",
-        ])
-        self._set_preview("\n".join(lines))
-        tail = f" ({len(warnings)} warnings)" if warnings else ""
-        self._set_status(f"Generated {len(dirs)} directories in {outdir}/{tail}")
-
-    def _generate_cp2k(self, values: dict, outdir: str, mode: str) -> None:
-        from pdb_wizard.sim_inputs import generate_cp2k_input
-        if self._molecule.pbc is None:
-            self._set_status("CP2K requires a periodic box")
-            return
-        kwargs = dict(
-            project_name=values["project"],
-            cutoff_Ry=values["cutoff_ry"],
-            rel_cutoff_Ry=values["rel_cutoff_ry"],
-            xc_functional=values["xc_functional"],
-            eps_scf=values["eps_scf"],
-            max_scf=values["max_scf"],
-        )
-        if mode == "dft_md":
-            kwargs.update(
-                temperature_K=values["temperature"],
-                timestep_fs=values["timestep_fs"],
-                n_md_steps=values["n_md_steps"],
-                md_traj_interval=values["md_traj_interval"],
-            )
-        else:
-            kwargs["n_opt_steps"] = values["n_opt_steps"]
-        result = generate_cp2k_input(self._molecule, outdir, mode=mode, **kwargs)
-        self._set_preview(
-            f"Wrote CP2K {mode} input:\n"
-            f"  {result['input']}\n"
-            f"  {result['xyz']}\n\n"
-            f"Elements: {', '.join(result['elements'])}\n\n"
-            f"To run: cd {outdir} && cp2k -i {Path(result['input']).name} -o out.log"
-        )
-        self._set_status(f"Wrote {result['input']}")
-
-    def _generate_openmm(self, values: dict, outdir: str, ensemble: str) -> None:
-        from pdb_wizard.sim_inputs import generate_openmm_script
-        kwargs = dict(
-            forcefield=values["forcefield"],
-            temperature_K=values["temperature_k"],
-            timestep_fs=values["timestep_fs"],
-            n_steps=values["n_steps"],
-            report_interval=values["report_interval"],
-            nonbonded_cutoff_nm=values["nonbonded_cutoff_nm"],
-        )
-        if ensemble == "NPT":
-            kwargs["pressure_atm"] = values["pressure_atm"]
-        result = generate_openmm_script(
-            self._molecule, outdir, ensemble=ensemble, **kwargs,
-        )
-        self._set_preview(
-            f"Wrote OpenMM {ensemble} driver:\n"
-            f"  {result['script']}\n"
-            f"  {result['pdb']}\n\n"
-            f"To run: cd {outdir} && python {Path(result['script']).name}"
-        )
-        self._set_status(f"Wrote {result['script']}")
-
 
 # Backward-compat: existing imports of IsothermPlannerScreen keep working.
 # Subclass so the engine arg defaults to MPMC isotherm without callers needing
@@ -2604,19 +2282,12 @@ class DatabaseSearchScreen(ModalScreen[None]):
             pass
 
     def _modes_for(self, source: str) -> tuple[str, ...]:
-        from pdb_wizard.database import BACKENDS
-        if source == "all":
-            return self._ALL_MODES
-        return BACKENDS.get(source, {}).get("modes", ("text",))
+        from pdb_wizard.database import modes_for
+        return modes_for(source)
 
     def _placeholder_for(self, source: str, mode: str) -> str:
-        from pdb_wizard.database import BACKENDS
-        if source == "all":
-            if mode == "formula":
-                return "formula across all DBs (eg 'C9H8O4')"
-            return "free-text search across all DBs"
-        spec = BACKENDS.get(source, {})
-        return spec.get("placeholder", {}).get(mode, "query")
+        from pdb_wizard.database import placeholder_for
+        return placeholder_for(source, mode)
 
     def compose(self) -> ComposeResult:
         from pdb_wizard.database import BACKENDS
@@ -2735,36 +2406,15 @@ class DatabaseSearchScreen(ModalScreen[None]):
         if not query:
             return
 
+        from pdb_wizard.database import backends_for, search_backends
         status = self.query_one("#db-status", Label)
-        if source == "all":
-            # Only query backends that support this mode
-            codes = [c for c, spec in BACKENDS.items() if mode in spec["modes"]]
-        else:
-            codes = [source]
-
+        codes = backends_for(source, mode)
         status.update(
             f"Searching {', '.join(BACKENDS[c]['label'] for c in codes)} "
             f"({mode})..."
         )
         await asyncio.sleep(0)
-
-        coros = [asyncio.to_thread(BACKENDS[c]["search"], query, mode) for c in codes]
-        per_backend = await asyncio.gather(*coros, return_exceptions=True)
-
-        results: list[dict] = []
-        per_source_counts: dict[str, int] = {}
-        errors: list[str] = []
-        for code, out in zip(codes, per_backend):
-            if isinstance(out, Exception):
-                errors.append(f"{BACKENDS[code]['label']} ({type(out).__name__})")
-                per_source_counts[code] = 0
-                continue
-            results.extend(out)
-            per_source_counts[code] = len(out)
-
-        # Sort results by source label so they group nicely in the table
-        results.sort(key=lambda r: (r.get("source", ""), r.get("id", "")))
-
+        results, msg = await asyncio.to_thread(search_backends, source, mode, query)
         self._results = results
         table = self.query_one("#db-results", DataTable)
         table.clear()
@@ -2776,16 +2426,6 @@ class DatabaseSearchScreen(ModalScreen[None]):
                 r.get("formula", "")[:25],
                 r.get("title", "")[:60],
             )
-
-        if source == "all" and len(codes) > 1:
-            breakdown = ", ".join(
-                f"{BACKENDS[c]['label']}={per_source_counts.get(c, 0)}" for c in codes
-            )
-            msg = f"{len(results)} results  ({breakdown})"
-        else:
-            msg = f"{len(results)} results in {BACKENDS[codes[0]]['label']}" if codes else "0 results"
-        if errors:
-            msg += f"  •  errors: {', '.join(errors)}"
         status.update(msg)
         self.query_one("#db-preview", Label).update("")
 
@@ -2868,12 +2508,8 @@ class EnergyPlotScreen(_AnalysisScreen):
 
     def _n_steps(self) -> int:
         """Number of rows in the energy data."""
-        for k in ("step", "N", "energy"):
-            if k in self._data:
-                return len(self._data[k])
-        if self._data:
-            return len(next(iter(self._data.values())))
-        return 0
+        from pdb_wizard.analyses import energy_n_steps
+        return energy_n_steps(self._data)
 
     def compose(self) -> ComposeResult:
         cols = [k for k in self._data if k != "step"]
@@ -2919,43 +2555,27 @@ class EnergyPlotScreen(_AnalysisScreen):
     def _step_slice(self) -> slice:
         """Resolve the user's Start/End SpinBoxes into a Python slice.
         Returns the full range if the SpinBoxes don't exist (no data)."""
-        n = self._n_steps()
+        from pdb_wizard.analyses import energy_slice
         try:
-            start = self.query_one("#energy-start", SpinBox).value - 1  # 1-indexed in UI
-            end = self.query_one("#energy-end", SpinBox).value         # inclusive in UI
+            start = self.query_one("#energy-start", SpinBox).value
+            end = self.query_one("#energy-end", SpinBox).value
         except Exception:
-            return slice(0, n)
-        # Clamp + ensure end > start
-        start = max(0, min(start, n - 1))
-        end = max(start + 1, min(end, n))
-        return slice(start, end)
+            return energy_slice(self._data)
+        return energy_slice(self._data, start, end)
 
     def _plot_column(self, col: str) -> None:
+        from pdb_wizard.analyses import run_energy
         if col not in self._data:
             return
         sl = self._step_slice()
-        full_steps = self._data.get("step", np.arange(len(self._data[col])))
-        steps = full_steps[sl]
-        values = self._data[col][sl]
-        if len(values) == 0:
-            self.query_one("#energy-status", Label).update("Empty step range")
+        res = run_energy(self._data, col, sl.start + 1, sl.stop)
+        if res.empty:
+            self.query_one("#energy-status", Label).update(res.summary)
             return
         plot = self.query_one("#energy-plot", PlotWidget)
-        y_min = float(values.min()) * (0.9 if values.min() > 0 else 1.1)
-        y_max = float(values.max()) * 1.1 if values.max() > 0 else float(values.max()) * 0.9
-        if y_min == y_max:
-            y_max = y_min + 1
-        title = col
-        n_total = self._n_steps()
-        if sl.start != 0 or sl.stop != n_total:
-            title = f"{col} (steps {sl.start + 1}-{sl.stop})"
-        plot.set_data(steps, values, title=title, x_label="step",
-                      y_min=y_min, y_max=y_max)
-        avg = float(values[-len(values)//4:].mean()) if len(values) > 4 else float(values.mean())
-        self.query_one("#energy-status", Label).update(
-            f"{col} [{sl.start + 1}-{sl.stop}]: "
-            f"last-quarter avg = {avg:.4f}, final = {values[-1]:.4f}"
-        )
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label,
+                      y_min=res.y_min, y_max=res.y_max)
+        self.query_one("#energy-status", Label).update(res.summary)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "energy-close":
@@ -2967,17 +2587,13 @@ class EnergyPlotScreen(_AnalysisScreen):
             )
 
     def _export_csv(self, filepath: str) -> None:
+        from pdb_wizard.analyses import write_energy_csv
         if not filepath.strip():
             return
         sl = self._step_slice()
         path = filepath.strip()
         try:
-            with open(path, "w") as f:
-                cols = list(self._data.keys())
-                f.write(",".join(cols) + "\n")
-                for i in range(sl.start, sl.stop):
-                    row = ",".join(f"{self._data[c][i]:.6f}" for c in cols)
-                    f.write(row + "\n")
+            write_energy_csv(self._data, path, sl)
         except OSError as e:
             self.query_one("#energy-status", Label).update(f"Error: {e}")
             self.app.notify(f"Could not write {path}: {e}", timeout=6, severity="error")
@@ -3037,52 +2653,31 @@ class DensityScreen(_AnalysisScreen):
             self.app.push_screen(FileSaveModal("Save density as CSV:", default="density.csv"), callback=self._export_csv)
 
     async def _run_density(self) -> None:
-        from pdb_wizard.density_profile import (
-            compute_density_profile,
-            compute_density_profile_trajectory,
-        )
+        from pdb_wizard.analyses import run_density_profile
         el = str(self.query_one("#dens-el", Select).value)
         name = str(self.query_one("#dens-name", Select).value)
         axis = int(self.query_one("#dens-axis", Select).value)
-        name_filter = name if name != "(all)" else None
         use_traj = False
         try:
-            use_traj = self.query_one("#dens-traj", Checkbox).value and self._frames and len(self._frames) > 1
+            use_traj = bool(self.query_one("#dens-traj", Checkbox).value
+                            and self._frames and len(self._frames) > 1)
         except Exception:
             pass
-
-        # Frame range
-        if use_traj:
-            frames = self._get_frame_slice()
-        else:
-            frames = self._frames
-
+        start, end = self._frame_range() if use_traj else (1, None)
         status = self.query_one("#dens-status", Label)
-        axis_label = ["a", "b", "c"][axis]
-        status.update(f"Computing density profile {el} along {axis_label}...")
+        status.update(f"Computing density profile {el} along {'abc'[axis]}...")
         await asyncio.sleep(0)
-
-        if use_traj:
-            pos, dens = await asyncio.to_thread(
-                compute_density_profile_trajectory, frames, axis, 100, el, name_filter,
-            )
-            title = f"Density {el} ({axis_label}-axis, {len(frames)} frames)"
-        else:
-            pos, dens = await asyncio.to_thread(
-                compute_density_profile, self._molecule, axis, 100, el, name_filter,
-            )
-            title = f"Density {el} ({axis_label}-axis)"
-
-        if len(pos) == 0:
-            status.update(f"No {el} atoms found")
+        res = await asyncio.to_thread(run_density_profile, self._molecule, el, name, axis,
+                                      self._frames, start, end, use_traj)
+        if res.empty:
+            status.update(res.summary)
             return
-
-        self._last_pos = pos
-        self._last_dens = dens
+        self._last_pos = res.x
+        self._last_dens = res.y
         plot = self.query_one("#dens-plot", PlotWidget)
-        y_max = float(dens.max()) * 1.1 if dens.max() > 0 else 1.0
-        plot.set_data(pos, dens, title=title, x_label=f"position along {axis_label} (A)", y_min=0.0, y_max=y_max)
-        status.update(f"max density = {dens.max():.2f} atoms/A at {pos[dens.argmax()]:.2f} A")
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0,
+                      y_max=res.y_max)
+        status.update(res.summary)
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "position_A,density", self._last_pos, self._last_dens)
@@ -3135,66 +2730,50 @@ class PxrdScreen(_AnalysisScreen):
             )
 
     async def _run_pxrd(self) -> None:
-        from pdb_wizard.pxrd import compute_pxrd
+        from pdb_wizard.analyses import run_pxrd
         wl = float(self.query_one("#pxrd-wl", Select).value)
         tt_max = float(self.query_one("#pxrd-ttmax", SpinBox).value)
         width = self.query_one("#pxrd-width", SpinBox).value / 100.0  # hundredths to degrees
-
         status = self.query_one("#pxrd-status", Label)
         status.update("Computing PXRD pattern...")
-
         self._rdf_progress = [0.0]
+
         def _prog(frac):
             self._rdf_progress[0] = frac
+
         poll = self.set_interval(0.1, lambda: status.update(
             f"Computing PXRD... {int(self._rdf_progress[0] * 100)}%"
         ))
         await asyncio.sleep(0)
-
         try:
-            tt, intensity = await asyncio.to_thread(
-                compute_pxrd, self._molecule, wavelength=wl,
-                two_theta_max=tt_max, peak_width=width, progress_callback=_prog,
-            )
+            res = await asyncio.to_thread(run_pxrd, self._molecule, wl, tt_max, width, _prog)
         finally:
             poll.stop()
-
-        if len(tt) == 0:
-            status.update("No reflections found")
+        if res.empty:
+            status.update(res.summary)
             return
-
-        self._last_tt = tt
-        self._last_intensity = intensity
+        self._last_tt = res.x
+        self._last_intensity = res.y
         plot = self.query_one("#pxrd-plot", PlotWidget)
-        wl_name = "Cu Ka" if abs(wl - 1.5406) < 0.01 else f"{wl:.4f} A"
-        plot.set_data(tt, intensity, title=f"PXRD ({wl_name})",
-                      x_label="2-theta (deg)", y_min=0.0, y_max=105.0)
-        n_peaks = len([r for r in intensity if r > 5])
-        status.update(f"{n_peaks} peaks above 5% intensity")
+        plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0,
+                      y_max=res.y_max)
+        status.update(res.summary)
 
     def _load_experimental(self, filepath: str) -> None:
+        from pdb_wizard.analyses import read_experimental_pxrd
         if not filepath.strip():
             return
         try:
-            data = np.loadtxt(filepath.strip(), delimiter=None, comments="#")
-            if data.ndim == 1:
-                # Try comma-separated
-                data = np.loadtxt(filepath.strip(), delimiter=",", comments="#", skiprows=1)
-            if data.ndim != 2 or data.shape[1] < 2:
-                self.query_one("#pxrd-status", Label).update("Error: need 2 columns (2theta, intensity)")
-                return
-            exp_tt = data[:, 0]
-            exp_int = data[:, 1]
-            # Normalize to 100
-            if exp_int.max() > 0:
-                exp_int = exp_int / exp_int.max() * 100
-            plot = self.query_one("#pxrd-plot", PlotWidget)
-            plot.set_overlay(exp_tt, exp_int, color="rgb(255,130,60)")
-            self.query_one("#pxrd-status", Label).update(
-                f"Experimental data loaded ({len(exp_tt)} points) — cyan=simulated, orange=experimental"
-            )
+            exp_tt, exp_int = read_experimental_pxrd(filepath.strip())
         except Exception as e:
             self.query_one("#pxrd-status", Label).update(f"Error loading: {e}")
+            return
+        plot = self.query_one("#pxrd-plot", PlotWidget)
+        plot.set_overlay(exp_tt, exp_int, color="rgb(255,130,60)")
+        self.query_one("#pxrd-status", Label).update(
+            f"Experimental data loaded ({len(exp_tt)} points) — "
+            "cyan=simulated, orange=experimental"
+        )
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "two_theta_deg,intensity", self._last_tt, self._last_intensity)
@@ -3394,20 +2973,8 @@ class MoleculeView(Widget):
         mol = self.molecule
         if self.hide_water:
             # Detect actual water molecules: O bonded to exactly 2 H (and nothing else)
-            water_atoms: set[int] = set()
-            if mol.bonds:
-                neighbors: dict[int, list[int]] = {}
-                for a, b in mol.bonds:
-                    neighbors.setdefault(a, []).append(b)
-                    neighbors.setdefault(b, []).append(a)
-                for i, a in enumerate(mol.atoms):
-                    if a.element.symbol != "O":
-                        continue
-                    nbrs = neighbors.get(i, [])
-                    h_nbrs = [j for j in nbrs if mol.atoms[j].element.symbol == "H"]
-                    if len(h_nbrs) == 2 and len(nbrs) == 2:
-                        water_atoms.add(i)
-                        water_atoms.update(h_nbrs)
+            from pdb_wizard.geometry import water_atom_indices
+            water_atoms = water_atom_indices(mol)
             if water_atoms:
                 keep = [i for i in range(len(mol.atoms)) if i not in water_atoms]
                 keep_set = set(keep)
@@ -3937,6 +3504,7 @@ MENU_EDIT = [
     ("update_cell", "Update Unit Cell"),
     ("substitute", "Substitute Element"),
     ("reduce_cell", "Reduce Supercell"),
+    ("pack_sorbates", "Pack Sorbates"),
     ("---", ""),
     ("qeq_charges", "Generate QEq Charges"),
 ]
@@ -4375,16 +3943,8 @@ class PdbWizardApp(App):
     @staticmethod
     def _is_trajectory_file(filepath: str) -> bool:
         """True for multi-frame PDB/XYZ files and readable DCD files."""
-        from pdb_wizard.io import check_pdb_trajectory, check_xyz_trajectory, detect_filetype
-        ft = detect_filetype(filepath)
-        if ft == "pdb":
-            return check_pdb_trajectory(filepath)
-        if ft == "xyz":
-            return check_xyz_trajectory(filepath)
-        if ft == "dcd":
-            from pdb_wizard.dcd import check_dcd_trajectory
-            return check_dcd_trajectory(filepath)
-        return False
+        from pdb_wizard.trajectory import is_trajectory_file
+        return is_trajectory_file(filepath)
 
     def _open_new_tab(self, filepath: str) -> None:
         if not filepath.strip():
@@ -4415,12 +3975,9 @@ class PdbWizardApp(App):
 
     async def _load_traj_into_tab(self, filepath: str, tab_idx: int) -> None:
         """Load a trajectory file into a specific tab in the background."""
-        from pdb_wizard.io import detect_filetype, read_pdb_trajectory, read_xyz_trajectory
-
         self._show_progress("Loading trajectory...", total=100)
         await asyncio.sleep(0)
 
-        ft = detect_filetype(filepath)
         _progress = [0.0]
 
         def _prog(frac: float) -> None:
@@ -4436,16 +3993,8 @@ class PdbWizardApp(App):
         timer = self.set_interval(0.1, _poll_progress)
 
         def _read():
-            if ft == "dcd":
-                from pdb_wizard.dcd import read_dcd_trajectory
-                mols, _ = read_dcd_trajectory(filepath, progress_callback=_prog)
-                return mols
-            with open(filepath) as f:
-                if ft == "pdb":
-                    mols, _ = read_pdb_trajectory(f, progress_callback=_prog)
-                else:
-                    mols, _ = read_xyz_trajectory(f, progress_callback=_prog)
-            return mols
+            from pdb_wizard.trajectory import read_trajectory
+            return read_trajectory(filepath, _prog)
 
         try:
             frames = await asyncio.to_thread(_read)
@@ -4559,12 +4108,9 @@ class PdbWizardApp(App):
             self._startup_load_messages = []
 
     async def _load_trajectory_async(self) -> None:
-        from pdb_wizard.io import detect_filetype, read_pdb_trajectory, read_xyz_trajectory
-
         self._show_progress("Loading trajectory...", total=100)
         await asyncio.sleep(0)
 
-        ft = detect_filetype(self.filepath)
 
         def _prog(frac: float) -> None:
             self.call_from_thread(self._update_progress, int(frac * 80))
@@ -4574,16 +4120,8 @@ class PdbWizardApp(App):
             )
 
         def _read():
-            if ft == "dcd":
-                from pdb_wizard.dcd import read_dcd_trajectory
-                mols, _ = read_dcd_trajectory(self.filepath, progress_callback=_prog)
-                return mols
-            with open(self.filepath) as f:
-                if ft == "pdb":
-                    mols, _ = read_pdb_trajectory(f, progress_callback=_prog)
-                else:
-                    mols, _ = read_xyz_trajectory(f, progress_callback=_prog)
-            return mols
+            from pdb_wizard.trajectory import read_trajectory
+            return read_trajectory(self.filepath, _prog)
 
         frames = await asyncio.to_thread(_read)
         self._warn_trajectory_caveats(frames)
@@ -4617,26 +4155,9 @@ class PdbWizardApp(App):
 
     def _warn_trajectory_caveats(self, frames: list | None) -> None:
         """Toast anything the trajectory reader had to assume or fake."""
-        if not frames:
-            return
-        first = frames[0]
-        # DCD without a topology file: every atom is a carbon placeholder.
-        if getattr(first, "_dcd_topology_missing", False):
-            self.notify(
-                "DCD has no element info. All atoms loaded as carbon. "
-                "Place a sibling .pdb or .xyz with the same atom count "
-                "next to the .dcd file.",
-                severity="warning", timeout=8,
-            )
-        # No cell in the file: the reader substituted a huge non-periodic box.
-        from pdb_wizard.io import NO_CELL_FALLBACK_LENGTH, is_fallback_cell
-        if is_fallback_cell(first.pbc):
-            self.notify(
-                f"Trajectory has no cell information; assuming a "
-                f"{NO_CELL_FALLBACK_LENGTH:.0f} Å box (non-periodic). "
-                "Use Update Cell if the system is periodic.",
-                severity="warning", timeout=8,
-            )
+        from pdb_wizard.trajectory import trajectory_caveats
+        for note in trajectory_caveats(frames):
+            self.notify(note, severity="warning", timeout=8)
 
     def _setup_traj_bar(self) -> None:
         traj_bar = self.query_one("#traj-bar")
@@ -5150,6 +4671,7 @@ class PdbWizardApp(App):
         self._track_task(self._export_png_async())
 
     async def _calc_void_volume(self) -> None:
+        from pdb_wizard.analyses import void_volume_report
         from pdb_wizard.operations import void_volume
         mol = self.molecule
         self._show_progress("Calculating void volume (geometric)...")
@@ -5158,75 +4680,49 @@ class PdbWizardApp(App):
         self._update_progress(50)
         result_he = await asyncio.to_thread(void_volume, mol, 100000, 1.14)
         self._hide_progress()
-
-        gvv = result_geo.get("void_volume", 0)
-        gtv = result_geo.get("total_volume", 0)
-        gvf = result_geo.get("void_fraction", 0) * 100
-        hvv = result_he.get("void_volume", 0)
-        htv = result_he.get("total_volume", 0)
-        hvf = result_he.get("void_fraction", 0) * 100
-        lines = [
-            "Void Volume Analysis (100,000 MC samples)",
-            "",
-            "Geometric (no probe):",
-            f"  Void volume:   {gvv:.2f} A^3",
-            f"  Total volume:  {gtv:.2f} A^3",
-            f"  Void fraction: {gvf:.1f}%",
-            "",
-            "He probe (r = 1.14 A):",
-            f"  Void volume:   {hvv:.2f} A^3",
-            f"  Total volume:  {htv:.2f} A^3",
-            f"  Void fraction: {hvf:.1f}%",
-        ]
-        self.push_screen(InfoModal("Void Volume", "\n".join(lines)))
+        self.push_screen(InfoModal("Void Volume", void_volume_report(result_geo, result_he)))
 
     async def _calc_surface_area(self) -> None:
-        from pdb_wizard.operations import surface_area
+        from pdb_wizard.analyses import surface_area_text
         mol = self.molecule
         self._show_progress("Calculating surface area (N2 probe)...")
-        result = await asyncio.to_thread(surface_area, mol, 100000, 1.4)
+        text = await asyncio.to_thread(surface_area_text, mol, 100000, 1.4)
         self._hide_progress()
-        sa = result.get("surface_area", 0)
-        apv = result.get("area_per_volume", 0)
-        lines = [
-            "Solvent-Accessible Surface Area",
-            "  Probe radius: 1.4 A (N2-sized)",
-            f"  Surface area: {sa:.1f} A^2",
-            f"  Specific area: {apv:.1f} m^2/g",
-        ]
-        self.push_screen(InfoModal("Surface Area", "\n".join(lines)))
+        self.push_screen(InfoModal("Surface Area", text))
 
     async def _calc_pore_size(self) -> None:
-        from pdb_wizard.operations import pore_size_distribution
+        from pdb_wizard.analyses import run_pore_size
         mol = self.molecule
         self._show_progress("Computing pore size distribution...")
-        bins, hist = await asyncio.to_thread(pore_size_distribution, mol, 50000, 50, 20.0)
+        res = await asyncio.to_thread(run_pore_size, mol, 50000, 50, 20.0)
         self._hide_progress()
-        if len(bins) == 0:
-            self.notify("No PBC for pore size calculation", timeout=3)
+        if res.empty:
+            self.notify(res.summary, timeout=3)
             return
-        # Find dominant pore size
-        peak = bins[hist.argmax()] if hist.max() > 0 else 0
-        # Show as a plot
-        from pdb_wizard.viewer import PlotWidget
+
         class PsdScreen(ModalScreen[None]):
             BINDINGS = [Binding("escape", "close", ""), Binding("q", "close", "")]
-            DEFAULT_CSS = "PsdScreen > Vertical { width: 100%; height: 100%; background: $surface; padding: 0 1; }"
-            def __init__(self, b, h, p):
+            DEFAULT_CSS = ("PsdScreen > Vertical { width: 100%; height: 100%; "
+                           "background: $surface; padding: 0 1; }")
+
+            def __init__(self, result):
                 super().__init__()
-                self._b, self._h, self._p = b, h, p
+                self._res = result
+
             def compose(self_inner) -> ComposeResult:
                 with Vertical():
                     yield PlotWidget(id="psd-plot")
-                    yield Label(f"Dominant pore diameter: {self_inner._p * 2:.2f} A  |  press q to close", id="psd-status")
+                    yield Label(f"{self_inner._res.summary}  |  press q to close", id="psd-status")
+
             def on_mount(self_inner) -> None:
-                plot = self_inner.query_one("#psd-plot", PlotWidget)
-                y_max = float(self_inner._h.max()) * 1.1 if self_inner._h.max() > 0 else 1.0
-                plot.set_data(self_inner._b * 2, self_inner._h, title="Pore Size Distribution",
-                              x_label="pore diameter (A)", y_min=0.0, y_max=y_max)
+                r = self_inner._res
+                self_inner.query_one("#psd-plot", PlotWidget).set_data(
+                    r.x, r.y, title=r.title, x_label=r.x_label, y_min=0.0, y_max=r.y_max)
+
             def action_close(self_inner) -> None:
                 self_inner.dismiss(None)
-        self.push_screen(PsdScreen(bins, hist, peak))
+
+        self.push_screen(PsdScreen(res))
 
     async def _export_png_async(self) -> None:
         view = self.query_one(MoleculeView)
@@ -5665,40 +5161,13 @@ class PdbWizardApp(App):
             self.notify("Invalid input. Need: x y z", timeout=3)
 
     def on_operations_panel_run_command(self, event: OperationsPanel.RunCommand) -> None:
-        from pdb_wizard.operations import (
-            formula_unit,
-            formula_unit_reduced,
-            system_info,
-        )
-
         mol = self.molecule
         cmd = event.command
         view = self.query_one(MoleculeView)
 
         if cmd == "info":
-            info = system_info(mol, self.filepath)
-            fname = info.get("filename", "")
-            n_at = info.get("n_atoms", 0)
-            lines = [f"Filename:  {fname}", f"Atoms:     {n_at}"]
-            if "volume" in info:
-                c = info.get("cell", {})
-                ca, cb, cc = c.get("a", 0), c.get("b", 0), c.get("c", 0)
-                al, be, ga = c.get("alpha", 0), c.get("beta", 0), c.get("gamma", 0)
-                vol = info.get("volume", 0)
-                dens = info.get("density", 0)
-                lines.append(f"Cell:      {ca:.4f}  {cb:.4f}  {cc:.4f}")
-                lines.append(f"Angles:    {al:.2f}  {be:.2f}  {ga:.2f}")
-                lines.append(f"Volume:    {vol:.2f} A^3")
-                lines.append(f"Density:   {dens:.4f} g/cm^3")
-                lines.append("")
-                for row in info.get("basis_matrix", []):
-                    lines.append(f"  {row[0]:>14.8f} {row[1]:>14.8f} {row[2]:>14.8f}")
-            fu = formula_unit(mol)
-            reduced = formula_unit_reduced(mol)
-            lines.append("")
-            lines.append("Total:     " + "  ".join(f"{k}{v}" for k, v in fu.items()))
-            lines.append("Formula:   " + "  ".join(f"{k}{v}" for k, v in reduced.items()))
-            self.push_screen(InfoModal("System Info", "\n".join(lines)))
+            from pdb_wizard.analyses import system_info_text
+            self.push_screen(InfoModal("System Info", system_info_text(mol, self.filepath)))
             return
 
         elif cmd == "rdf":
@@ -5816,6 +5285,12 @@ class PdbWizardApp(App):
                 InputModal("Substitute element:", default="Cu Zn", hint="old new (e.g. Cu Zn)"),
                 callback=self._do_substitute,
             )
+            return
+
+        elif cmd == "pack_sorbates":
+            if not self._require_cell("Packing sorbates"):
+                return
+            self.push_screen(SorbateModal(standalone=True), callback=self._pack_step_model)
             return
 
         elif cmd == "reduce_cell":
@@ -6392,25 +5867,8 @@ class PdbWizardApp(App):
         self._hide_progress()
 
         # Show summary
-        charges = np.array([a.charge for a in mol.atoms])
-        lines = [
-            f"QEq charges computed for {len(mol.atoms)} atoms",
-            "",
-            f"Total charge:  {charges.sum():.6f} e",
-            f"Min charge:    {charges.min():.6f} e",
-            f"Max charge:    {charges.max():.6f} e",
-            f"Mean |charge|: {np.abs(charges).mean():.6f} e",
-            "",
-            "Per-element averages:",
-        ]
-        from collections import defaultdict
-        by_el: dict[str, list[float]] = defaultdict(list)
-        for a in mol.atoms:
-            by_el[a.element.symbol].append(a.charge)
-        for el in sorted(by_el):
-            arr = by_el[el]
-            lines.append(f"  {el:<3} ({len(arr):>4}):  avg = {np.mean(arr):>8.5f}  range = [{min(arr):.5f}, {max(arr):.5f}]")
-        self.push_screen(InfoModal("QEq Charges", "\n".join(lines)))
+        from pdb_wizard.analyses import charge_report
+        self.push_screen(InfoModal("QEq Charges", charge_report(mol)))
 
     # MSD and Density are now launched as full screens (MsdScreen, DensityScreen)
 
@@ -6464,13 +5922,12 @@ class PdbWizardApp(App):
         if not os.path.isdir(dirpath):
             self.notify(f"Not a directory: {dirpath}", timeout=3)
             return
-        from pdb_wizard.isotherm import parse_isotherm_results
-        results = parse_isotherm_results(dirpath)
-        if not results:
-            self.notify("No completed pressure points found", timeout=3)
+        from pdb_wizard.analyses import run_isotherm
+        res = run_isotherm(dirpath)
+        if res.empty:
+            self.notify(res.summary, timeout=3)
             return
-        pressures = np.array([r[0] for r in results])
-        uptakes = np.array([r[1] for r in results])
+        pressures, uptakes = res.x, res.y
 
         class IsothermPlotScreen(_AnalysisScreen):
             _prefix = "iso"
@@ -6717,6 +6174,72 @@ class PdbWizardApp(App):
             for msg in missing_ff_messages(missing):
                 self.notify(msg.strip("! "), timeout=8, severity="warning")
         self._mpmc_step_sorbate()
+
+    # --- Edit > Pack Sorbates: add movable sorbate molecules to the structure ---
+
+    def _pack_step_model(self, choice: str | None) -> None:
+        if not choice:
+            return  # Cancel
+        if choice == SorbateModal.FROM_FILE:
+            self.push_screen(
+                FileSaveModal("Sorbate template (MPMC .pqr):", default="", button_label="Open"),
+                callback=self._pack_step_template,
+            )
+            return
+        from pdb_wizard.sorbates import SORBATE_MODELS
+        self._pack_ask_count(SORBATE_MODELS[choice])
+
+    def _pack_step_template(self, path: str | None) -> None:
+        if not path or not path.strip():
+            return
+        from pdb_wizard.sorbates import read_sorbate_template
+        try:
+            model = read_sorbate_template(path.strip())
+        except (OSError, ValueError) as e:
+            self.notify(f"Could not read the template: {e}", severity="error", timeout=6)
+            return
+        self._pack_ask_count(model)
+
+    def _pack_ask_count(self, model) -> None:
+        self.push_screen(
+            InputModal(f"How many {model.label} molecules?", default="1",
+                       hint="A number, or 'fill' to pack until nothing else fits. "
+                            "Positions and orientations are random, with no overlaps "
+                            "(minimum image in the real cell)."),
+            callback=lambda value: self._pack_step_count(model, value),
+        )
+
+    def _pack_step_count(self, model, value: str | None) -> None:
+        if not value or not value.strip():
+            return  # Cancel / Escape
+        raw = value.strip().lower()
+        if raw == "fill":
+            n = None
+        elif raw.isdigit() and int(raw) > 0:
+            n = int(raw)
+        else:
+            self.notify("Enter a positive number or 'fill'", severity="warning")
+            self._pack_ask_count(model)
+            return
+        self._track_task(self._pack_sorbates_async(model, n))
+
+    async def _pack_sorbates_async(self, model, n: int | None) -> None:
+        from pdb_wizard.io import mpmc_movable_count
+        from pdb_wizard.sorbates import insert_sorbates, sorbate_atoms
+        mol = self.molecule
+        self._show_progress(f"Packing {model.label}...")
+        await asyncio.sleep(0)
+        placed = await asyncio.to_thread(insert_sorbates, mol, model, n)
+        if not placed:
+            self._hide_progress()
+            self.notify("No room for even one molecule with these settings.",
+                        severity="error", timeout=5)
+            return
+        self._save_undo()
+        mol.atoms.extend(sorbate_atoms(model, placed, 2 + mpmc_movable_count(mol)))
+        full = "" if n is None or len(placed) == n else f" (asked for {n}; the cell is full)"
+        await self._refresh_molecule(
+            f"Packed {len(placed)} {model.label}{full}. Save as MPMC PDB for MPMC.")
 
     def _mpmc_step_sorbate(self) -> None:
         self.push_screen(

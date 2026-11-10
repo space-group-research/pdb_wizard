@@ -38,7 +38,9 @@ def window(qtbot):
     w.resize(1200, 800)
     w.show()
     qtbot.waitExposed(w)
-    return w
+    yield w
+    for d in w.dialogs:  # tool and report windows the test opened
+        d.close()
 
 
 @pytest.fixture
@@ -106,7 +108,7 @@ def test_reset_view_centres_the_cell(hkust):
     v = hkust.view
     v.rotate(1.0, 0.5)
     v.reset_view()
-    corners, _ = v._project(v.cell_corners())
+    corners = v._project(v.cell_corners())[0]
     centre = corners.mean(axis=0)
     assert abs(centre[0] - v.width() / 2) < 2 and abs(centre[1] - v.height() / 2) < 2
     assert corners[:, 0].min() >= 0 and corners[:, 0].max() <= v.width()
@@ -153,8 +155,8 @@ def test_view_toggles(hkust):
     hkust.chk_bonds.setChecked(False)
     no_bonds = image_array(v)
     assert (base != no_bonds).mean() > 0.001
-    hkust.chk_charge.setChecked(True)
-    assert v.color_by_charge
+    hkust.color_combo.setCurrentIndex(hkust.color_combo.findData("charge"))
+    assert v.color_mode == "charge"
     hkust.size_slider.setValue(150)
     assert v.atom_scale == pytest.approx(1.5)
     hkust.chk_cell.setChecked(False)

@@ -1,0 +1,761 @@
+"""Desktop GUI features added to match the terminal viewer: tabs, trajectories, every edit,
+the geometry tables, view styles and options, measuring, 3D density, analysis windows, the
+input generator, database search and GIF export.
+
+Headless (QT_QPA_PLATFORM=offscreen); skipped without PySide6 and pytest-qt.
+"""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+pytest.importorskip("PySide6.QtWidgets")
+pytest.importorskip("pytestqt")
+
+from PySide6 import QtCore, QtWidgets  # noqa: E402
+
+from pdb_wizard import database, gui  # noqa: E402
+from pdb_wizard.analyses import charge_report  # noqa: E402
+from pdb_wizard.atom import Atom  # noqa: E402
+from pdb_wizard.gui_tools import (  # noqa: E402
+    AnalysisDialog,
+    DatabaseDialog,
+    GuiTask,
+    InputGeneratorDialog,
+    QtPlot,
+    ReduceCellDialog,
+    geometry_rows,
+)
+from pdb_wizard.inputgen import generate_engine_inputs  # noqa: E402
+from pdb_wizard.io import read_file  # noqa: E402
+from pdb_wizard.molecule import Molecule  # noqa: E402
+from pdb_wizard.pbc import PBC  # noqa: E402
+from pdb_wizard.reduce_cell import reduce_to_primitive  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+HKUST = ROOT / "HKUST-1.pdb"
+WOFOUR = ROOT / "WOFOUR-1-Ni.pqr"
+
+
+@pytest.fixture
+def window(qtbot):
+    w = gui.MainWindow()
+    w.warnings = []
+    w._warn = w.warnings.append
+    qtbot.addWidget(w)
+    w.resize(1200, 800)
+    w.show()
+    qtbot.waitExposed(w)
+    yield w
+    for d in w.dialogs:
+        d.close()
+
+
+@pytest.fixture
+def hkust(window):
+    assert window.open_path(str(HKUST))
+    return window
+
+
+def pixels(widget):
+    from PySide6 import QtGui
+    img = widget.grab().toImage().convertToFormat(QtGui.QImage.Format.Format_RGB32)
+    return np.frombuffer(bytes(img.constBits()), np.uint8).reshape(img.height(), img.width(), 4)
+
+
+def differs(a, b, frac=0.0005):
+    return a.shape != b.shape or (a != b).mean() > frac
+
+
+def water_frames(n_frames=12):
+    rng = np.random.default_rng(5)
+    centres = rng.uniform(2, 13, (8, 3))
+    for k in range(n_frames):
+        rows = []
+        for c in centres:
+            o = c + [0.2 * k, 0, 0]
+            for el, d in (("O", (0, 0, 0)), ("H", (0.96, 0, 0)), ("H", (-0.24, 0.93, 0))):
+                rows.append((el, o + d))
+        yield rows
+
+
+def write_pdb_trajectory(path, n_frames=12):
+    """Multi-model PDB with a 15 Å cubic cell."""
+    with open(path, "w") as f:
+        for k, rows in enumerate(water_frames(n_frames)):
+            f.write("CRYST1   15.000   15.000   15.000  90.00  90.00  90.00 P 1           1\n")
+            f.write(f"MODEL     {k + 1:4d}\n")
+            for i, (el, x) in enumerate(rows):
+                f.write(f"ATOM  {i + 1:5d} {el:<4s} HOH A{i // 3 + 1:4d}    "
+                        f"{x[0]:8.3f}{x[1]:8.3f}{x[2]:8.3f}  1.00  0.00          {el:>2s}\n")
+            f.write("ENDMDL\n")
+
+
+def write_xyz_trajectory(path, n_frames=12):
+    """Multi-frame XYZ: no cell."""
+    with open(path, "w") as f:
+        for rows in water_frames(n_frames):
+            f.write(f"{len(rows)}\nframe\n")
+            for el, x in rows:
+                f.write(f"{el} {x[0]:.5f} {x[1]:.5f} {x[2]:.5f}\n")
+
+
+@pytest.fixture
+def traj(window, tmp_path):
+    path = tmp_path / "water.pdb"
+    write_pdb_trajectory(path)
+    assert window.open_path(str(path))
+    window.load_task.wait()
+    return window
+
+
+# ---- tabs and trajectories --------------------------------------------------------------
+
+
+def test_tabs_open_switch_and_close(hkust):
+    w = hkust
+    assert w.tab_bar.count() == 1 and w.tab_bar.tabText(0) == "HKUST-1.pdb"
+    w.view.rotate(0.7, 0.2)
+    rot = w.view._rot.copy()
+    assert w.open_path(str(WOFOUR))
+    assert w.tab_bar.count() == 2 and w.doc_index == 1
+    n_wofour = len(w.mol.atoms)
+    w.tab_bar.setCurrentIndex(0)
+    assert len(w.mol.atoms) == 624 and np.allclose(w.view._rot, rot)  # camera kept per tab
+    w.tab_bar.setCurrentIndex(1)
+    w.close_tab(0)
+    assert w.tab_bar.count() == 1 and len(w.mol.atoms) == n_wofour
+    w.close_tab(0)
+    assert w.mol is None and w.windowTitle() == "PDB Wizard — no structure"
+    assert w.open_path(str(HKUST)) and w.tab_bar.count() == 1  # reuses the empty tab
+
+
+def test_close_a_background_tab_keeps_the_current_one(hkust):
+    w = hkust
+    w.open_path(str(WOFOUR))
+    w.open_path(str(HKUST))
+    assert w.doc_index == 2
+    w.close_tab(1)
+    assert w.doc_index == 1 and w.tab_bar.count() == 2 and len(w.mol.atoms) == 624
+
+
+def test_trajectory_loads_with_frame_bar(traj):
+    w = traj
+    assert len(w.frames) == 12 and w.frame_bar.isVisible()
+    assert "(frame 1/12)" in w.windowTitle()
+    w.frame_bar.go(4)
+    assert w.mol is w.frames[4] and w.doc.frame_idx == 4
+    assert w.mol.bonds is w.frames[0].bonds  # same topology: bonds reused
+    assert w.info_labels["Frame"].text() == "5 / 12"
+    w.frame_bar.buttons["next"].click()
+    w.frame_bar.buttons["last"].click()
+    assert w.doc.frame_idx == 11
+    w.frame_bar.buttons["first"].click()
+    assert w.doc.frame_idx == 0
+
+
+def test_play_and_speed(traj, qtbot):
+    bar = traj.frame_bar
+    bar.set_speed(4)
+    assert bar.speed_label.text() == "4.0x" and bar.timer.interval() == 25
+    bar.set_speed(100)
+    assert bar.speed == 16.0
+    bar.set_speed(1)
+    bar.toggle_play()
+    assert bar.playing
+    qtbot.waitUntil(lambda: traj.doc.frame_idx >= 2, timeout=3000)
+    bar.toggle_play()
+    assert not bar.playing
+    assert traj.table_model.mol is traj.mol  # tables caught up when playback stopped
+
+
+def test_frame_to_tab_and_trajectory_analyses(traj):
+    w = traj
+    w.frame_bar.go(3)
+    d = w.frame_to_tab()
+    assert d.name == "water_frame4" and w.doc_index == 1 and not w.frames
+    assert w.mol is not d.frames and len(w.mol.atoms) == 24
+    assert w.frame_to_tab() is None  # not a trajectory any more
+    w.tab_bar.setCurrentIndex(0)
+    dlg = w.open_tool("msd")
+    assert dlg is not None and dlg.start_spin.maximum() == 12
+    dlg.run().wait()
+    assert dlg.result is not None and not dlg.result.empty
+
+
+def test_trajectory_without_cell_warns(window, tmp_path):
+    path = tmp_path / "nocell.xyz"
+    write_xyz_trajectory(path, 3)
+    window.open_path(str(path))
+    window.load_task.wait()
+    assert any("no cell information" in m for m in window.warnings)
+
+
+def test_open_missing_file_and_drop_several(window, qtbot, tmp_path):
+    assert not window.open_path(str(tmp_path / "nope.pdb"))
+    assert "No such file" in window.warnings[-1]
+    mime = QtCore.QMimeData()
+    mime.setUrls([QtCore.QUrl.fromLocalFile(str(HKUST)), QtCore.QUrl.fromLocalFile(str(WOFOUR))])
+    from PySide6 import QtGui
+    ev = QtGui.QDropEvent(QtCore.QPointF(5, 5), QtCore.Qt.CopyAction, mime,
+                          QtCore.Qt.LeftButton, QtCore.Qt.NoModifier)
+    window.dropEvent(ev)
+    assert window.tab_bar.count() == 2
+
+
+# ---- edits ------------------------------------------------------------------------------
+
+
+def test_sort_and_undo(hkust):
+    w = hkust
+    before = [a.element.symbol for a in w.mol.atoms]
+    w.sort_atoms()
+    assert len(w.mol.atoms) == 624 and "Sorted atoms" in w.statusBar().currentMessage()
+    w.undo()
+    assert [a.element.symbol for a in w.mol.atoms] == before
+
+
+def water_box(window):
+    rng = np.random.default_rng(1)
+    atoms = []
+    for c in rng.uniform(3, 12, (4, 3)):
+        atoms += [Atom(*c, "O"), Atom(*(c + [0.96, 0, 0]), "H"), Atom(*(c + [0, 0.96, 0]), "H")]
+    window.new_tab(Molecule(atoms=atoms, pbc=PBC(15, 15, 15, 90, 90, 90)), name="w")
+    return window.mol
+
+
+def test_delete_lone_atoms(window):
+    mol = water_box(window)
+    assert window.delete_lone_atoms() == 0 and not window.undo_action.isEnabled()
+    assert "No lone atoms found" in window.statusBar().currentMessage()
+    far = mol.atoms[0].x + [7.5, 7.5, 7.5]
+    mol.atoms.append(Atom(*far, "Ar"))
+    assert window.delete_lone_atoms() == 1 and len(window.mol.atoms) == 12
+    window.undo()
+    assert len(window.mol.atoms) == 13
+
+
+def test_edit_h_distances(window):
+    water_box(window)
+    assert window.edit_h_distances("o", 1.05) == 8
+    mol = window.mol
+    assert np.linalg.norm(mol.atoms[1].x - mol.atoms[0].x) == pytest.approx(1.05)
+    assert window.edit_h_distances("N", 1.0) == 0
+    assert "No bonded N-H pairs" in window.statusBar().currentMessage()
+
+
+def test_update_and_remove_cell(hkust):
+    w = hkust
+    assert w.update_cell((27.0, 27.0, 27.0, 90.0, 90.0, 90.0))
+    assert w.mol.pbc.a == 27.0 and w.info_labels["a, b, c (Å)"].text().startswith("27.000")
+    assert w.update_cell(None) and w.mol.pbc is None
+    assert not w.update_cell(None)
+    assert w.update_cell((20, 20, 20, 90, 90, 90)) and w.mol.pbc.c == 20
+    w.undo()
+    w.undo()
+    assert w.mol.pbc.a == 27.0
+
+
+def test_cell_dialog_values(qtbot):
+    from pdb_wizard.gui_tools import CellDialog
+    dlg = CellDialog(None)
+    qtbot.addWidget(dlg)
+    assert dlg.values() == (10.0, 10.0, 10.0, 90.0, 90.0, 90.0)
+    assert not dlg.remove.isEnabled()
+    dlg = CellDialog(PBC(5, 6, 7, 80, 90, 100))
+    qtbot.addWidget(dlg)
+    dlg.remove.setChecked(True)
+    assert dlg.values() is None and not dlg.spins[0].isEnabled()
+
+
+def test_substitute_element(hkust):
+    w = hkust
+    assert w.substitute_element("Cu", "zn") == 48
+    assert sum(a.element.symbol == "Zn" for a in w.mol.atoms) == 48
+    assert w.substitute_element("Cu", "Zn") == 0
+    assert w.substitute_element("O", "Qq") == 0 and "Unknown element" in w.warnings[-1]
+
+
+def test_reduce_supercell(hkust, qtbot):
+    w = hkust
+    for spin in w.extend_spins:
+        spin.setValue(1)
+    w.build_supercell()
+    w.sorbate_count.setValue(3)
+    assert w.pack_sorbates() == 3
+    dlg = ReduceCellDialog(w.mol, w)
+    qtbot.addWidget(dlg)
+    assert dlg.reduce() is None and "Analyze first" in dlg.status.text()
+    dlg.analyze()
+    assert dlg.table.rowCount() == 3 and "Sorbate molecules: 3" in dlg.status.text()
+    dlg.table.item(1, 0).setCheckState(QtCore.Qt.Unchecked)
+    assert dlg.keep() == [0, 2]
+    expected = len(reduce_to_primitive(w.mol, 2, 2, 2, [0, 2]).atoms)
+    dlg.reduce()
+    assert w.reduce_supercell(dlg)
+    assert len(w.mol.atoms) == expected == 624 + 2 * 4
+    assert "kept 2/3 sorbate molecules" in w.statusBar().currentMessage()
+
+
+def test_qeq_shows_the_report(window):
+    window.open_path(str(WOFOUR))
+    window.qeq_charges()
+    report = window.dialogs[-1]
+    assert report.windowTitle() == "QEq Charges"
+    assert report.text.toPlainText() == charge_report(window.mol)
+
+
+def test_edits_need_a_cell(window):
+    window.new_tab(Molecule(atoms=[Atom(0, 0, 0, "C"), Atom(1.5, 0, 0, "C")]), name="m")
+    for fn in (window.sort_atoms, window.delete_lone_atoms, window.reduce_supercell,
+               lambda: window.edit_h_distances("C", 1.0)):
+        fn()
+        assert "needs a unit cell" in window.warnings[-1]
+
+
+# ---- geometry tables --------------------------------------------------------------------
+
+
+def test_geometry_rows_for_every_tab():
+    mol = read_file(str(HKUST))
+    for tab in ("Bonds", "Angles", "Dihedrals", "Contacts", "Mols", "Lone", "Coords"):
+        headers, rows = geometry_rows(mol, tab)
+        assert headers and all(len(c) == len(headers) for c, _ in rows), tab
+    _, bonds = geometry_rows(mol, "Bonds", ascending=True)
+    lengths = [float(c[2]) for c, _ in bonds]
+    assert lengths == sorted(lengths)
+    assert geometry_rows(None, "Bonds") == ([], [])
+    with pytest.raises(ValueError):
+        geometry_rows(mol, "Nope")
+
+
+def test_geometry_panel_highlights_sorts_and_edits(hkust):
+    w = hkust
+    w.geometry_dock.show()
+    w.geometry_dock.raise_()
+    panel = w.geometry
+    assert panel.tables["Bonds"].rowCount() > 0
+    panel.tables["Bonds"].setCurrentCell(3, 0)
+    assert len(w.view.highlighted) == 2
+    panel.sort_button.setChecked(True)
+    col = [float(panel.tables["Bonds"].item(r, 2).text())
+           for r in range(panel.tables["Bonds"].rowCount())]
+    assert col == sorted(col)
+    panel.tabs.setCurrentIndex(panel.tabs.indexOf(panel.tables["Coords"]))
+    t = panel.tables["Coords"]
+    assert t.rowCount() == 624 and not panel.sort_button.isEnabled()
+    t.item(0, 2).setText("1.5")
+    assert w.mol.atoms[0].x[0] == pytest.approx(1.5)
+    t.item(0, 3).setText("oops")  # not a number: nothing moves, the old value comes back
+    assert w.mol.atoms[0].x[1] != "oops" and t.item(0, 3).text() != "oops"
+    w.undo()
+    assert w.mol.atoms[0].x[0] != pytest.approx(1.5)
+
+
+# ---- view -------------------------------------------------------------------------------
+
+
+def test_styles_and_colour_modes_change_the_picture(hkust):
+    v = hkust.view
+    base = pixels(v)
+    for key in ("licorice", "vdw"):
+        hkust.style_combo.setCurrentIndex(hkust.style_combo.findData(key))
+        assert v.style_name == key
+        assert differs(base, pixels(v)), key
+    hkust.style_combo.setCurrentIndex(hkust.style_combo.findData("ribbon"))
+    hkust.set_style("cpk")
+    base = pixels(v)
+    hkust.set_style("ribbon")  # a MOF has no backbone: ball and stick, and a note why
+    assert not differs(base, pixels(v))
+    assert "No protein backbone" in hkust.statusBar().currentMessage()
+    hkust.style_combo.setCurrentIndex(0)
+    assert v.bond_radius == pytest.approx(0.11)
+    hkust.set_style("licorice")
+    assert v.bond_radius == pytest.approx(0.15) and hkust.sliders["bond_radius"].value() == 15
+    hkust.set_style("cpk")
+    base = pixels(v)
+    for key, _ in gui.COLOR_MODES[1:]:
+        hkust.color_combo.setCurrentIndex(hkust.color_combo.findData(key))
+        if key != "chain":  # one connected framework: a single chain colour
+            assert differs(base, pixels(v)), key
+
+
+def test_ribbon_traces_a_protein_backbone(window, qtbot):
+    atoms = []
+    for k in range(12):  # a helix-like CA trace
+        a = Atom(2.3 * np.cos(k), 2.3 * np.sin(k), 1.5 * k, "C")  # CA-CA ~2.7 Å
+        a.name = "CA"
+        atoms.append(a)
+    window.new_tab(Molecule(atoms=atoms), name="protein")
+    window.set_style("cpk")
+    base = pixels(window.view)
+    window.set_style("ribbon")
+    assert gui._ca_chains(window.mol) == [list(range(12))]
+    assert differs(base, pixels(window.view))
+
+
+def test_view_options_change_the_picture(hkust):
+    v = hkust.view
+    for attr in ("show_atom_numbers", "show_polyhedra", "orthographic", "depth_cue",
+                 "show_bonds", "show_cell"):
+        base = pixels(v)
+        hkust.view_checks[attr].toggle()
+        assert differs(base, pixels(v)), attr
+    for key in ("dark", "light"):
+        hkust.bg_combo.setCurrentIndex(hkust.bg_combo.findData(key))
+        corner = pixels(v)[2, 2, :3].mean()
+        assert (corner > 200) if key == "light" else (corner < 60)
+    for attr in ("ambient", "specular", "shininess", "atom_scale"):
+        base = pixels(v)
+        s = hkust.sliders[attr]
+        s.setValue(s.minimum() if s.value() > s.minimum() + 5 else s.maximum())
+        assert differs(base, pixels(v)), attr
+
+
+def test_hide_water(hkust):
+    w = hkust
+    w.sorbate_combo.setCurrentIndex(w.sorbate_combo.findData("h2o_tip3p"))
+    w.sorbate_count.setValue(4)
+    w.pack_sorbates()
+    w.view_checks["hide_water"].setChecked(True)
+    pixels(w.view)
+    assert (~w.view._visible).sum() == 12 and w.view._visible[:624].all()
+    front = int(np.argmax(np.where(w.view._visible, -1e9, w.view._depth)))
+    x, y = w.view._screen[front]
+    hit = w.view.atom_at(x, y)
+    assert hit is None or hit < 624  # hidden atoms cannot be picked
+
+
+def test_measure_and_shift_click(hkust, qtbot):
+    w, v = hkust, hkust.view
+    pixels(v)
+    w.view_checks["measure_mode"].setChecked(True)
+    i, j = 0, 1
+    assert "click another" in v.pick(i)
+    msg = v.pick(j)
+    d = w.mol.pbc.min_image(w.mol.atoms[i].x - w.mol.atoms[j].x)
+    assert msg == f"Distance 1-2 = {d:.4f} Å (pinned)"
+    assert v.measurements == [((0, 1), f"{d:.3f} Å")]
+    base = pixels(v)
+    v.clear_measurements()
+    assert differs(base, pixels(v))
+    w.view_checks["measure_mode"].setChecked(False)
+    v.pick(0, shift=True)
+    v.pick(1, shift=True)
+    msg = v.pick(2, shift=True)
+    assert msg.startswith("Angle 1-2-3 = ") and msg.endswith("°")
+    assert v.angle(0, 1, 2) == pytest.approx(float(msg.split("= ")[1][:-1]), abs=0.01)
+    front = int(np.argmax(v._depth))
+    x, y = (int(c) for c in v._screen[front])
+    qtbot.mouseClick(v, QtCore.Qt.LeftButton, QtCore.Qt.ShiftModifier, QtCore.QPoint(x, y))
+    assert w.statusBar().currentMessage().startswith(("Distance", "Angle", "Atom"))
+
+
+def test_view_keys_match_the_terminal_viewer(hkust, qtbot):
+    v = hkust.view
+    v.setFocus()
+    steps = [("v", "style_name", "licorice"), ("C", "color_mode", "charge"),
+             ("#", "show_atom_numbers", True), ("w", "hide_water", True),
+             ("P", "show_polyhedra", True), ("O", "orthographic", False),
+             ("m", "measure_mode", True), ("t", "pan_mode", True)]
+    for key, attr, value in steps:
+        qtbot.keyClicks(v, key)
+        assert getattr(v, attr) == value, key
+    assert hkust.style_combo.currentData() == "licorice"  # the View tab follows the keys
+    assert hkust.view_checks["measure_mode"].isChecked()
+    pan = QtCore.QPointF(v._pan)
+    qtbot.keyClick(v, QtCore.Qt.Key_Left)  # pan mode: arrows pan
+    assert v._pan != pan
+    qtbot.keyClicks(v, "c")
+    assert v._pan == QtCore.QPointF(0, 0)
+    rot = v._rot.copy()
+    qtbot.keyClicks(v, ",")
+    assert not np.allclose(rot, v._rot)
+    qtbot.keyClicks(v, "i")
+    assert v.background in ("light", "dark")
+    zoom = v._zoom
+    qtbot.keyClicks(v, "K")
+    assert v._zoom > zoom
+    qtbot.keyClicks(v, "J")
+    assert v._zoom == pytest.approx(zoom)
+
+
+def test_density_overlay(traj):
+    w = traj
+    w.density_3d("O").wait()
+    assert w.view.density is not None and w.density_action.isEnabled()
+    base = pixels(w.view)
+    w.density_action.setChecked(False)
+    assert differs(base, pixels(w.view))
+    w.density_action.setChecked(True)
+    w.set_density(None, None)
+    assert w.view.density is None and not w.density_action.isEnabled()
+    w.density_3d("Xe").wait()
+    assert "No Xe atoms" in w.statusBar().currentMessage()
+
+
+# ---- analysis windows -------------------------------------------------------------------
+
+
+def test_analysis_menu_entries_open(hkust):
+    for key in ("rdf", "coordination", "hbonds", "density", "pxrd", "isotherm_plot"):
+        dlg = hkust.open_tool(key)
+        assert isinstance(dlg, AnalysisDialog), key
+    dlg = hkust.open_tool("pore_size")  # nothing to set: computes straight away
+    dlg.task.wait()
+    assert dlg.result.summary.startswith("Dominant pore diameter")
+    assert hkust.open_tool("msd") is None
+    assert hkust.warnings[-1] == "Need a trajectory with 3+ frames for MSD"
+    assert isinstance(hkust.open_tool("input_generator"), InputGeneratorDialog)
+    assert isinstance(hkust.open_tool("db_search"), DatabaseDialog)
+
+
+def test_analysis_dialog_exports_and_options(hkust, tmp_path):
+    dlg = hkust.open_tool("rdf")
+    assert dlg.export_csv(str(tmp_path / "none.csv")) is None  # nothing computed yet
+    dlg.inputs["el1"].setCurrentText("Cu")
+    assert dlg.inputs["name1"].count() >= 2  # names follow the element
+    dlg.inputs["el2"].setCurrentText("O")
+    dlg.run().wait()
+    res = dlg.result
+    assert res.title == "g(r) Cu-O" and dlg.csv_button.isEnabled()
+    out = dlg.export_csv(str(tmp_path / "rdf.csv"))
+    lines = Path(out).read_text().splitlines()
+    assert lines[0] == "r(A),g(r)" and len(lines) == len(res.x) + 1
+    assert dlg.export_png(str(tmp_path / "rdf.png")) and (tmp_path / "rdf.png").stat().st_size
+    dlg.inputs["ymax"].setValue(40)
+    assert dlg.plot.y_max == 40
+    dlg.inputs["el1"].setCurrentText("H")
+    dlg.inputs["el2"].setCurrentText("H")
+    dlg.inputs["xmax"].setValue(2)
+    dlg.run().wait()
+    assert dlg.result.summary.startswith("max g(r)") or "pairs found" in dlg.result.summary
+
+
+def test_pxrd_experimental_overlay(hkust, tmp_path):
+    dlg = hkust.open_tool("pxrd")
+    dlg.run().wait()
+    exp = tmp_path / "exp.csv"
+    exp.write_text("two_theta,intensity\n6,50\n9,100\n")
+    assert dlg.load_experimental(str(exp))
+    assert dlg.plot.overlay is not None and "2 points" in dlg.status.text()
+    bad = tmp_path / "bad.xy"
+    bad.write_text("x\n")
+    assert not dlg.load_experimental(str(bad)) and "Error loading" in dlg.status.text()
+
+
+def test_analysis_failure_is_reported(qtbot, monkeypatch):
+    from pdb_wizard import gui_tools
+    spec = gui_tools.ANALYSES["pore_size"]
+
+    def boom(*a):
+        raise RuntimeError("kaput")
+
+    monkeypatch.setattr(spec, "run", boom)
+    dlg = AnalysisDialog("pore_size", read_file(str(HKUST)))
+    qtbot.addWidget(dlg)
+    dlg.run().wait()
+    assert dlg.status.text() == "Error: kaput" and dlg.compute_button.isEnabled()
+
+
+def test_plot_zoom_hover_and_overlay(qtbot):
+    plot = QtPlot()
+    qtbot.addWidget(plot)
+    plot.resize(600, 400)
+    plot.show()
+    x = np.linspace(0, 10, 101)
+    plot.set_data(x, np.sin(x), "t", "x")
+    plot.grab()
+    plot.zoom_x(2.0)
+    assert plot.limits()[1] - plot.limits()[0] == pytest.approx(5.0)
+    qtbot.keyClick(plot, QtCore.Qt.Key_R)
+    assert plot.x_range is None
+    qtbot.keyClick(plot, QtCore.Qt.Key_Plus)
+    qtbot.keyClick(plot, QtCore.Qt.Key_Minus)
+    qtbot.keyClick(plot, QtCore.Qt.Key_Minus)
+    assert plot.x_range is None  # zoomed back out past everything
+    qtbot.mouseMove(plot, QtCore.QPoint(300, 200))
+    assert plot._hover is not None
+    plot.set_overlay(x, np.cos(x), "exp")
+    plot.grab()
+    plot.y_min = None
+    assert plot.limits()[2] == pytest.approx(-1.0, abs=0.01)
+    plot.clear()
+    assert plot.limits() == (0.0, 1.0, 0.0, 1.0)
+    plot.grab()
+
+
+def test_energy_plot_from_the_window(hkust, tmp_path):
+    shutil.copy(HKUST, tmp_path / "s.pdb")
+    (tmp_path / "energy.dat").write_text(
+        "\n".join(f"{s} {-5 - s:.2f} 0 0 0 0 0 0 {s % 4} 0 0 0" for s in range(1, 21)) + "\n")
+    hkust.open_path(str(tmp_path / "s.pdb"))
+    dlg = hkust.open_tool("energy_plot")
+    assert dlg.column.currentText() == "N"
+    dlg.column.setCurrentText("energy")
+    dlg.start.setValue(5)
+    assert dlg.plot.title == "energy (steps 5-20)"
+    out = dlg.export_csv(str(tmp_path / "e.csv"))
+    assert len(Path(out).read_text().splitlines()) == 17
+    assert "Exported steps 5-20" in dlg.status.text()
+    empty = tmp_path / "empty.dat"
+    empty.write_text("# nothing\n")
+    assert hkust.energy_plot(str(empty)) is None and "Could not read" in hkust.warnings[-1]
+
+
+def test_void_and_surface_reports(hkust):
+    hkust.open_tool("void_vol").wait()
+    assert hkust.dialogs[-1].windowTitle() == "Void Volume"
+    hkust.open_tool("surface_area").wait()
+    assert "Surface area:" in hkust.dialogs[-1].text.toPlainText()
+    hkust.open_tool("info")
+    assert hkust.dialogs[-1].text.toPlainText().startswith("Filename:")
+
+
+def test_background_task_failure_warns(hkust):
+    hkust._busy("Doing it...", lambda: 1 / 0, lambda r: None).wait()
+    assert hkust.warnings[-1].startswith("Doing it failed:")
+
+
+# ---- input generator --------------------------------------------------------------------
+
+
+def test_input_generator_writes_the_same_files_as_the_shared_generator(hkust, tmp_path):
+    dlg = hkust.open_tool("input_generator")
+    assert dlg.engine == "mpmc_isotherm" and dlg.status.text()
+    for engine in ("cp2k_cell_opt", "cp2k_dft_md", "openmm_npt", "openmm_nvt"):
+        dlg.engine_box.setCurrentIndex(dlg.engine_box.findData(engine))
+        assert dlg.engine == engine and dlg.status.text() == "Edit values, then Generate."
+        dlg.outdir.setText(str(tmp_path / "gui" / engine))
+        out = dlg.generate()
+        assert out.ok, out.status
+        ref = generate_engine_inputs(hkust.mol, engine, dlg.values(),
+                                     str(tmp_path / "ref" / engine))
+        for f in (tmp_path / "ref" / engine).iterdir():
+            assert (tmp_path / "gui" / engine / f.name).read_text() == f.read_text()
+        assert ref.ok
+    dlg.show_template()
+    assert dlg.preview.toPlainText().startswith("-- openmm_nvt.py --")
+    dlg.validate()
+    assert dlg.status.text() == "Ready to generate"
+
+
+def test_input_generator_keeps_values_per_engine_and_rejects_bad_input(hkust):
+    dlg = InputGeneratorDialog(hkust.mol, str(HKUST), hkust)
+    dlg.widgets["temperature"].setText("298")
+    dlg.set_engine("cp2k_cell_opt")
+    dlg.widgets["cutoff_ry"].setText("")
+    assert dlg.generate() is None and dlg.status.text().startswith("Invalid input:")
+    dlg.set_engine("mpmc_isotherm")
+    assert float(dlg.widgets["temperature"].text()) == 298.0
+    assert dlg.outdir.text().endswith("isotherm")
+    dlg.widgets["pressures"].setText("0.1, 1")
+    assert dlg.values()["pressures"] == [0.1, 1.0]
+    dlg.close()
+
+
+# ---- database ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_backends(monkeypatch, tmp_path):
+    def search(code):
+        return lambda q, mode="text": [{"source": code, "id": f"{code}1", "formula": "Cu O",
+                                        "title": f"{q} ({mode})"}]
+
+    def fetch(rid, out_dir="."):
+        path = Path(out_dir) / f"{rid}.pdb"
+        shutil.copy(HKUST, path)
+        return str(path)
+
+    for code in database.BACKENDS:
+        monkeypatch.setitem(database.BACKENDS[code], "search", search(code))
+        monkeypatch.setitem(database.BACKENDS[code], "fetch", fetch)
+
+
+def test_database_search_and_fetch(hkust, fake_backends):
+    dlg = hkust.open_tool("db_search")
+    assert dlg.mode.count() == 2  # all databases: text and formula
+    assert dlg.search() is None  # empty query
+    dlg.query.setText("cuprite")
+    dlg.search().wait()
+    # text search goes to the three databases that have it (not Materials Project)
+    assert dlg.table.rowCount() == 3 and "3 results" in dlg.status.text()
+    dlg.table.setCurrentCell(0, 0)
+    assert "<b>COD</b> cod1" in dlg.preview.text()
+    assert dlg.fetch_by_id() is None and "Pick a specific database" in dlg.status.text()
+    dlg.fetch_selected().wait()
+    assert hkust.tab_bar.count() == 2 and hkust.doc.name == "cod1.pdb"
+    assert "Opened COD cod1 (624 atoms)" in hkust.statusBar().currentMessage()
+    cache = hkust._db_cache
+    hkust.close()
+    assert not Path(cache).exists()  # downloads are cleaned up with the window
+
+
+def test_database_modes_and_ids(window, fake_backends):
+    dlg = window.open_tool("db_search")
+    dlg.source.setCurrentIndex(dlg.source.findData("mp"))
+    assert [dlg.mode.itemData(i) for i in range(dlg.mode.count())] == ["formula", "id"]
+    assert dlg.query.placeholderText() == "Si O2"
+    dlg.mode.setCurrentIndex(dlg.mode.findData("id"))
+    assert dlg.search() is None and "Enter an ID" in dlg.status.text()
+    dlg.query.setText("mp-149")
+    dlg.search().wait()  # ID mode fetches directly
+    assert window.doc.name == "mp-149.pdb"
+    dlg = window.open_tool("db_search")
+    assert dlg.fetch_selected() is None and "Select a result first" in dlg.status.text()
+    dlg.source.setCurrentIndex(dlg.source.findData("rcsb"))
+    assert dlg.fetch_by_id() is None and "Enter an ID" in dlg.status.text()
+    assert dlg._fetch("nope", "x") is None and "Unknown source" in dlg.status.text()
+
+
+# ---- exports ----------------------------------------------------------------------------
+
+
+def test_export_gif(hkust, tmp_path):
+    Image = pytest.importorskip("PIL.Image")
+    out = hkust.export_gif(str(tmp_path / "spin.gif"), n_frames=6)
+    with Image.open(out) as img:
+        assert img.n_frames == 6 and img.info["duration"] == 80
+    rot = hkust.view._rot.copy()
+    hkust.export_gif(str(tmp_path / "again.gif"), n_frames=2)
+    assert np.allclose(rot, hkust.view._rot)  # the view is left as it was
+
+
+def test_export_gif_without_pillow(hkust, tmp_path, monkeypatch):
+    import builtins
+    real = builtins.__import__
+
+    def no_pil(name, *a, **k):
+        if name == "PIL" or name.startswith("PIL."):
+            raise ImportError(name)
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_pil)
+    assert hkust.export_gif(str(tmp_path / "x.gif")) is None
+    assert hkust.warnings[-1] == "Pillow required: pip install Pillow"
+
+
+def test_gui_task_reports_errors(qtbot):
+    seen = []
+    GuiTask(lambda: 1 / 0, seen.append, seen.append).wait()
+    assert isinstance(seen[0], ZeroDivisionError)
+
+
+def test_menus_list_every_tool(window):
+    names = set(window.actions_by_name)
+    for text in ("Radial distribution", "Powder XRD", "3D density map", "Energy plot (energy.dat)",
+                 "Input generator", "Fetch from database", "Substitute element",
+                 "Update unit cell", "Reduce supercell", "Edit H distances", "Delete lone atoms",
+                 "Sort atoms", "Open frame in new tab", "Export rotation GIF", "Cycle style",
+                 "Cycle colour mode", "Clear measurements", "Show 3D density"):
+        assert text in names, text
+    window.actions_by_name["Cycle style"].trigger()
+    assert window.view.style_name == "licorice" and window.style_combo.currentData() == "licorice"
+    window.actions_by_name["Extend axis (supercell)"].trigger()
+    assert window.tools.currentIndex() == 1
+    assert QtWidgets.QApplication.instance() is not None

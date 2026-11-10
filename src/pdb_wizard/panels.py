@@ -58,6 +58,7 @@ OPERATIONS = [
     ("update_cell",    "Update Unit Cell",         "modify"),
     ("substitute",     "Substitute Element",       "modify"),
     ("reduce_cell",    "Reduce Supercell",         "modify"),
+    ("pack_sorbates",  "Pack Sorbates",            "modify"),
     ("qeq_charges",    "Generate QEq Charges",     "modify"),
     # ---- File (mirrors top bar File menu) ----
     ("open_file",      "Open File...",             "export"),

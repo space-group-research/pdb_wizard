@@ -19,6 +19,7 @@ from typing import Callable
 import numpy as np
 from numpy import cos, pi, sin, sqrt
 
+from pdb_wizard.atom import Atom
 from pdb_wizard.io import _expand_numeric_tokens, require_cell
 from pdb_wizard.molecule import Molecule
 
@@ -436,3 +437,20 @@ def format_inserted_sorbates(model: SorbateModel | str, placements: list[np.ndar
             lines.append(_sorbate_atom_line(model, site, atom_id, start_mol_id + k, pos))
             atom_id += 1
     return lines
+
+
+def sorbate_atoms(model: SorbateModel, placements, first_mol_id: int) -> list:
+    """Atoms for packed sorbate molecules, flagged movable (M) with consecutive molecule
+    ids so an MPMC export keeps them movable. ``placements`` is what insert_sorbates
+    returns: one (n_sites, 3) array per molecule."""
+    atoms = []
+    for k, xyz in enumerate(placements):
+        for site, pos in zip(model.sites, xyz):
+            atom = Atom(pos[0], pos[1], pos[2], site.atomtype)
+            atom.charge, atom.alpha = site.charge, site.polarizability
+            atom.epsilon, atom.sigma = site.epsilon, site.sigma
+            atom.c6, atom.c8, atom.c10 = site.c6, site.c8, site.c10
+            atom.mpmc_flag, atom.mpmc_mol = "M", first_mol_id + k
+            atom.mpmc_res, atom.file_mass = model.label, site.mass
+            atoms.append(atom)
+    return atoms

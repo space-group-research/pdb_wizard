@@ -30,11 +30,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-viewer = ["textual>=3.0"]
-gui = ["PySide6>=6.4"]
+viewer = ["textual>=3.0", "Pillow"]  # Pillow: PNG and rotation-GIF export
+gui = ["PySide6>=6.4", "Pillow"]
 test = [
     "pytest>=7.0", "pytest-cov", "pytest-asyncio", "pytest-xdist", "pytest-qt",
-    "hypothesis", "python-minifier",
+    "hypothesis", "python-minifier", "Pillow",
 ]
 
 [project.scripts]

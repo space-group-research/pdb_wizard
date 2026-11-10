@@ -38,18 +38,42 @@ Gaussian, Z-matrix, DCD and multi-frame PDB/XYZ trajectories.
 
 ![PDB Wizard's desktop window: HKUST-1 with packed DC97 water](docs/gui.png)
 
-`pdb_wizard --gui` opens a ball-and-stick view (drag to rotate, right-drag to pan, wheel to
-zoom, click an atom to inspect it), the structure's cell, formula and density, an atom table,
-and tools for supercells, wrapping, sorbate packing, force fields and charges, with undo. It
-is drawn with Qt's painter rather than OpenGL, so it also works over SSH X forwarding. It uses
-the desktop's own style on KDE (Breeze) and a dark Fusion theme elsewhere. Open files from
-the menu or by dropping them on the window; *Save as* picks the format from the extension
+![An analysis window: the Cu–O radial distribution in HKUST-1](docs/gui-analysis.png)
+
+`pdb_wizard --gui` has everything the terminal viewer has, in windows and menus:
+
+- **View**: ball and stick, licorice, space filling or protein ribbon; colour by element,
+  charge, residue, chain or index; atom numbers, hidden water, coordination polyhedra,
+  perspective or orthographic, dark or light background, lighting and size sliders. Drag to
+  rotate, right-drag to pan, wheel to zoom; the terminal viewer's keys work too (`v`, `C`,
+  `#`, `w`, `P`, `O`, `m`, `t`, `c`, `r`, `,`/`.`).
+- **Measure**: in measure mode two clicks pin a distance; shift-click two or three atoms
+  for a distance or angle.
+- **Tabs and trajectories**: each file opens in a tab; multi-frame PDB/XYZ and DCD files
+  get a frame slider with play, speed and "open frame in new tab".
+- **Edit** (with undo): wrap, sort, supercells and reducing them back (choosing which
+  sorbates to keep), delete lone atoms, set X–H distances, update or remove the cell,
+  substitute elements, edit coordinates, QEq or file charges, force fields, and sorbate
+  packing.
+- **Analysis**: system info, void volume, surface area, pore sizes, RDF, coordination
+  numbers, H-bonds, MSD and diffusion constants, RMSD, radius of gyration, density
+  profiles, 3D density maps, powder XRD (with an experimental overlay), MPMC energy.dat
+  and isotherm plots, each with CSV and PNG export.
+- **Tools**: the input generator (MPMC isotherms, CP2K, OpenMM), structure database
+  search (COD, RCSB PDB, PubChem, Materials Project) and a geometry panel listing bonds,
+  angles, dihedrals, contacts, molecules and lone atoms.
+- **Export**: PNG and rotation GIF.
+
+Both front ends run the same analysis and input-generator code, so they report the same
+numbers (the test suite checks this). The window is drawn with Qt's painter rather than
+OpenGL, so it also works over SSH X forwarding. It uses the desktop's own style on KDE
+(Breeze) and a dark Fusion theme elsewhere. *Save as* picks the format from the extension
 (`.pqr` = MPMC). It needs PySide6, the package's `gui` extra.
 
 ### Packing sorbates for MPMC
 
-The *Sorbates* tab in the desktop window, *Save as MPMC PDB* in the terminal viewer, or
-option 10 in the classic menu packs N copies of a
+The *Sorbates* tab in the desktop window, *Edit > Pack Sorbates* (or *Save as MPMC PDB*)
+in the terminal viewer, or option 10 in the classic menu packs N copies of a
 sorbate (or fills the cell) at random positions and orientations. Overlaps are checked with
 the minimum image in the actual (monoclinic or triclinic) cell, against the framework and
 against each other. Built-in models include TIP3P, TIP4P, TIP5P, SPC/E, DC97 and POL3 water,
@@ -77,7 +101,9 @@ Optional suites:
 
 The test run builds `dist/pdb_wizard.py` first, so the single-file version is tested too. The
 desktop-window tests run headless (`QT_QPA_PLATFORM=offscreen`) and skip without PySide6 and
-pytest-qt.
+pytest-qt. `tests/test_gui_parity.py` runs every analysis in both the desktop window and the
+terminal viewer and requires identical results, and fails if a terminal-viewer operation has
+no desktop counterpart.
 
 ## License
 
