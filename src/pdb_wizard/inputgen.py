@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.templates import ENGINES, VarSpec, load_template
 
@@ -43,33 +41,20 @@ def default_engine_outdir(filepath: str, engine: str) -> str:
     return str(base / _FOLDERS.get(engine, "sim_input"))
 
 
-def _checked(var: VarSpec, value: float) -> float:
-    if not np.isfinite(value):
-        raise ValueError(f"{var.label} must be a finite number")
-    if var.min_val is not None and value < var.min_val:
-        raise ValueError(f"{var.label} must be at least {var.min_val:g}")
-    if var.max_val is not None and value > var.max_val:
-        raise ValueError(f"{var.label} must be at most {var.max_val:g}")
-    return value
-
-
 def parse_form_value(var: VarSpec, raw: Any) -> Any:
-    """A form entry converted to the variable's type and checked against its range.
-
-    Empty or out-of-range numbers raise ValueError with a message for the status line.
-    """
+    """A form entry converted to the variable's type; empty numbers raise ValueError."""
     if var.kind == "int":
-        return int(_checked(var, int(raw)))
+        return int(raw)
     if var.kind == "float":
         text = str(raw).strip()
         if not text:
             raise ValueError(f"{var.label} is empty")
-        return _checked(var, float(text))
+        return float(text)
     if var.kind == "csv_floats":
         parts = [p.strip() for p in str(raw).split(",") if p.strip()]
         if not parts:
             raise ValueError(f"{var.label} is empty")
-        return [_checked(var, float(p)) for p in parts]
+        return [float(p) for p in parts]
     return str(raw)
 
 

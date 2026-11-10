@@ -2105,12 +2105,9 @@ class InputGeneratorScreen(ModalScreen[None]):
         new_key = str(event.value)
         if new_key == self._engine_key:
             return
-        # Move the output folder to the new engine's default, unless the user chose one
-        outdir = self.query_one("#gen-outdir", Input)
-        keep = outdir.value.strip() != self._default_outdir()
         self._engine_key = new_key
-        if not keep:
-            outdir.value = self._default_outdir()
+        # Reset outdir to engine default
+        self.query_one("#gen-outdir", Input).value = self._default_outdir()
         self._build_form()
         self._update_description()
         if new_key == "mpmc_isotherm":

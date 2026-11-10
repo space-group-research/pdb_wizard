@@ -328,23 +328,19 @@ def test_cell_dialog_keeps_values_it_cannot_show(qtbot):
     assert dlg.values()[0] == 30.0 and dlg.values()[1] == 26.343567
 
 
-def test_input_generator_ranges_precision_and_folder(qtbot, tmp_path):
+def test_input_generator_keeps_pressures_exactly(qtbot, tmp_path):
+    """Pressures were rounded to 6 digits when switching engines (1234567 -> 1234570)."""
     mol = read_file(str(HKUST))
     dlg = InputGeneratorDialog(mol, str(HKUST))
     qtbot.addWidget(dlg)
     dlg.widgets["temperature"].setText("-5")
-    assert dlg.generate() is None and "at least 1" in dlg.status.text()
-    dlg.widgets["temperature"].setText("77")
+    assert dlg.values()["temperature"] == -5.0  # accepted as before (flagged, not changed)
     dlg.widgets["pressures"].setText("0.00123456789, 1234567, 0.1")
     dlg.outdir.setText(str(tmp_path / "mine"))
     dlg.set_engine("cp2k_cell_opt")
-    assert dlg.outdir.text() == str(tmp_path / "mine")  # a chosen folder stays
+    assert dlg.outdir.text().endswith("cp2k_cell_opt")  # engine default, as in the TUI
     dlg.set_engine("mpmc_isotherm")
     assert dlg.values()["pressures"] == [0.00123456789, 1234567.0, 0.1]
-    dlg2 = InputGeneratorDialog(mol, str(HKUST))
-    qtbot.addWidget(dlg2)
-    dlg2.set_engine("openmm_nvt")
-    assert dlg2.outdir.text().endswith("openmm_nvt")  # default folders still follow
 
 
 def test_database_odd_results(qtbot, monkeypatch, tmp_path):

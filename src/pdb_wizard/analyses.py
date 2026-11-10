@@ -19,7 +19,6 @@ from pdb_wizard.density3d import compute_density_3d
 from pdb_wizard.density_profile import compute_density_profile, compute_density_profile_trajectory
 from pdb_wizard.gyration import compute_gyration_trajectory
 from pdb_wizard.hbonds import count_hbonds_trajectory, detect_hbonds
-from pdb_wizard.io import is_fallback_cell
 from pdb_wizard.isotherm import parse_isotherm_results
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.msd import compute_diffusion_constant, compute_msd
@@ -61,12 +60,6 @@ class AnalysisResult:
 
     def csv_arrays(self) -> tuple:
         return self.csv_data if self.csv_data is not None else (self.x, self.y)
-
-
-def _has_cell(mol: Molecule) -> bool:
-    """A real periodic cell: not missing, and not the 10^6 Å stand-in the trajectory
-    readers give files without one (densities and g(r) against that are meaningless)."""
-    return mol.pbc is not None and not is_fallback_cell(mol.pbc)
 
 
 def _opt(value: Optional[str]) -> Optional[str]:
@@ -112,9 +105,9 @@ def unavailable(key: str, mol: Optional[Molecule], frames: Optional[list]) -> Op
     if key == "density3d":
         if n_frames < 2:
             return "Need a trajectory with PBC for 3D density"
-        if mol is None or not _has_cell(mol):
+        if mol is None or mol.pbc is None:
             return "Need PBC for 3D density map"
-    if key == "pxrd" and (mol is None or not mol.atoms or not _has_cell(mol)):
+    if key == "pxrd" and (mol is None or not mol.atoms or mol.pbc is None):
         return "Need a crystal structure with PBC for PXRD"
     if mol is None:
         return "No atoms loaded"
@@ -122,7 +115,7 @@ def unavailable(key: str, mol: Optional[Molecule], frames: Optional[list]) -> Op
         return None
     if not mol.atoms:
         return "No atoms loaded yet" if key == "rdf" else "No atoms loaded"
-    if not _has_cell(mol):
+    if mol.pbc is None:
         need = {"surface_area": "Need PBC for surface area", "pore_size": "Need PBC for pore size",
                 "void_vol": "Need PBC for void volume"}
         if key in need:
@@ -210,7 +203,7 @@ def charge_report(mol: Molecule) -> str:
 
 def run_pore_size(mol: Molecule, n_samples: int = 50000, n_bins: int = 50,
                   max_pore: float = 20.0) -> AnalysisResult:
-    if not _has_cell(mol):
+    if mol.pbc is None:
         return AnalysisResult(summary="No PBC for pore size calculation")
     bins, hist = pore_size_distribution(mol, n_samples, n_bins, max_pore)
     peak = bins[hist.argmax()] if hist.max() > 0 else 0
@@ -236,8 +229,6 @@ def run_rdf(mol: Molecule, el1: str, el2: str, name1: str = ALL_ATOMS, name2: st
     n1, n2 = _opt(name1), _opt(name2)
     label1, label2 = n1 or el1, n2 or el2
     traj = use_traj and frames and len(frames) > 1
-    if not _has_cell(frames[0] if traj else mol):
-        return AnalysisResult(summary="RDF needs a periodic cell")
     if traj:
         empty = _empty_window(frames, start, end)
         if empty:
@@ -276,17 +267,15 @@ def run_coordination(mol: Molecule, center: str, neighbor: str, r_max: float = 5
 def run_hbonds(mol: Molecule, cutoff: float = 3.5, angle: float = 120.0,
                frames: Optional[list] = None, start: int = 1,
                end: Optional[int] = None) -> AnalysisResult:
-    """H-bonds per frame; x is the frame number (1-based, counted in the whole trajectory)."""
     if frames and len(frames) > 1:
         empty = _empty_window(frames, start, end)
         if empty:
             return empty
         idx, counts = count_hbonds_trajectory(frame_slice(frames, start, end), cutoff, angle)
-        idx = idx + max(start, 1)
         text = ""
     else:
         hb = detect_hbonds(mol, cutoff, angle)
-        idx, counts = np.array([1.0]), np.array([float(len(hb))])
+        idx, counts = np.array([0.0]), np.array([float(len(hb))])
         text = "\n".join(["donor      H  acceptor   D...A (A)   angle (deg)"] + [
             f"{d + 1:>5} {h + 1:>6} {a + 1:>9}   {dist:9.3f}   {ang:11.1f}"
             for d, h, a, dist, ang in hb])
@@ -329,8 +318,7 @@ def run_rmsd(frames: list, element: str = ALL_ATOMS, name: str = ALL_ATOMS, dt: 
     avg = float(vals[len(vals) // 2:].mean())
     return AnalysisResult(idx * dt, vals, f"RMSD ({el or 'all'})", "time (ps)",
                           f"RMSD avg (2nd half) = {avg:.3f} A  |  max = {vals.max():.3f} A",
-                          "frame,rmsd_A", y_max=_grow(vals),
-                          csv_data=(idx + max(start, 1), vals))  # whole-trajectory frame numbers
+                          "frame,rmsd_A", y_max=_grow(vals), csv_data=(idx, vals))
 
 
 def run_gyration(frames: list, element: str = ALL_ATOMS, dt: float = 1.0, start: int = 1,
@@ -345,7 +333,7 @@ def run_gyration(frames: list, element: str = ALL_ATOMS, dt: float = 1.0, start:
     return AnalysisResult(idx * dt, rg, f"Rg ({el or 'all'})", "time (ps)",
                           f"Avg Rg = {rg.mean():.3f} A  |  std = {rg.std():.3f} A", "frame,rg_A",
                           y_min=float(rg.min()) * 0.9 if rg.min() > 0 else 0.0, y_max=_grow(rg),
-                          csv_data=(idx + max(start, 1), rg))
+                          csv_data=(idx, rg))
 
 
 def run_density_profile(mol: Molecule, element: str, name: str = ALL_ATOMS, axis: int = 2,
@@ -355,8 +343,6 @@ def run_density_profile(mol: Molecule, element: str, name: str = ALL_ATOMS, axis
     nm = _opt(name)
     axis_label = "abc"[axis]
     traj = use_traj and frames and len(frames) > 1
-    if not _has_cell(frames[0] if traj else mol):
-        return AnalysisResult(summary="A density profile needs a periodic cell")
     if traj:
         empty = _empty_window(frames, start, end)
         if empty:

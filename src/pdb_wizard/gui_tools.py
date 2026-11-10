@@ -1038,8 +1038,6 @@ class InputGeneratorDialog(_QDialogT):
         if key == self.engine:
             return
         self._values_by_engine[self.engine] = self.values(strict=False)
-        self._custom_outdir = (self.outdir.text().strip()
-                               != default_engine_outdir(self.filepath, self.engine))
         self.engine = key
         self.engine_box.blockSignals(True)
         self.engine_box.setCurrentIndex(self.engine_box.findData(key))
@@ -1049,8 +1047,7 @@ class InputGeneratorDialog(_QDialogT):
     def _load_engine(self) -> None:
         spec = ENGINES[self.engine]
         self.description.setText(spec.description)
-        if not getattr(self, "_custom_outdir", False):  # keep a folder the user chose
-            self.outdir.setText(default_engine_outdir(self.filepath, self.engine))
+        self.outdir.setText(default_engine_outdir(self.filepath, self.engine))
         while self.form.rowCount():
             self.form.removeRow(0)
         self.widgets.clear()

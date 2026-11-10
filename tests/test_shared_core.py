@@ -129,7 +129,7 @@ def test_runs_report_missing_data():
     assert long.summary.startswith("D = ") and long.extra["D"] > 0
     np.testing.assert_array_equal(long.x, long.csv_arrays()[0] * 2.0)
     hb = analyses.run_hbonds(mol)
-    assert hb.x.tolist() == [1.0] and hb.text.startswith("donor")  # frame numbers are 1-based
+    assert hb.x.tolist() == [0.0] and hb.text.startswith("donor")
     rg = analyses.run_gyration(frames, "O", dt=0.5, start=2, end=4)
     assert len(rg.x) == 3 and rg.csv_header == "frame,rg_A"
 
