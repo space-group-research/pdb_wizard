@@ -46,6 +46,7 @@ MODULE_ORDER = [
     "panels",
     "viewer",
     "menu",
+    "gui",
     "__main__",
 ]
 

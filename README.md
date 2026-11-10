@@ -23,6 +23,7 @@ A single-file version, `pdb_wizard.py`, needs only NumPy. Build it with `python 
 ## Use
 
 ```bash
+pdb_wizard --gui structure.cif      # desktop window (Qt; needs the gui extra, PySide6)
 pdb_wizard structure.cif            # 3D terminal viewer (textual)
 pdb_wizard --classic structure.pdb  # the original text menu
 pdb_wizard structure.pqr --info     # batch: formula, cell, density
@@ -33,9 +34,22 @@ pdb_wizard --help                   # all batch options (--rdf, --msd, --surface
 Reads PDB (standard, pdb2pqr and MPMC dialects), CIF, XYZ, POSCAR, LAMMPS data, SDF, MOL2,
 Gaussian, Z-matrix, DCD and multi-frame PDB/XYZ trajectories.
 
+### Desktop window
+
+![PDB Wizard's desktop window: HKUST-1 with packed DC97 water](docs/gui.png)
+
+`pdb_wizard --gui` opens a ball-and-stick view (drag to rotate, right-drag to pan, wheel to
+zoom, click an atom to inspect it), the structure's cell, formula and density, an atom table,
+and tools for supercells, wrapping, sorbate packing, force fields and charges, with undo. It
+is drawn with Qt's painter rather than OpenGL, so it also works over SSH X forwarding. It uses
+the desktop's own style on KDE (Breeze) and a dark Fusion theme elsewhere. Open files from
+the menu or by dropping them on the window; *Save as* picks the format from the extension
+(`.pqr` = MPMC). It needs PySide6, the package's `gui` extra.
+
 ### Packing sorbates for MPMC
 
-*Save as MPMC PDB* in the viewer, or option 10 in the classic menu, packs N copies of a
+The *Sorbates* tab in the desktop window, *Save as MPMC PDB* in the terminal viewer, or
+option 10 in the classic menu packs N copies of a
 sorbate (or fills the cell) at random positions and orientations. Overlaps are checked with
 the minimum image in the actual (monoclinic or triclinic) cell, against the framework and
 against each other. Built-in models include TIP3P, TIP4P, TIP5P, SPC/E, DC97 and POL3 water,
@@ -61,7 +75,9 @@ Optional suites:
 | `--baseline REF` | differential regression tests against a git ref or a built `pdb_wizard.py` (default `main`; skipped when identical) |
 | `--corpus DIR` | the regression tests over every structure under `DIR` (e.g. MPMC's `tutorials_and_examples`) |
 
-The test run builds `dist/pdb_wizard.py` first, so the single-file version is tested too.
+The test run builds `dist/pdb_wizard.py` first, so the single-file version is tested too. The
+desktop-window tests run headless (`QT_QPA_PLATFORM=offscreen`) and skip without PySide6 and
+pytest-qt.
 
 ## License
 

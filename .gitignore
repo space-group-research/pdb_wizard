@@ -22,3 +22,4 @@ NVT/
 *_out.xyz
 Ni-MOF-74_out_mpmc.pdb
 *.png
+!docs/*.png

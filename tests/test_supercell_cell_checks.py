@@ -3,6 +3,7 @@
 Run from the repo root:  python -m pytest tests/
 Needs numpy, textual, pytest and pytest-asyncio.
 """
+
 import importlib.util
 import math
 import sys
@@ -14,7 +15,9 @@ import pytest
 SRC = Path(__file__).resolve().parent.parent / "dist" / "pdb_wizard.py"  # built by conftest.py
 spec = importlib.util.spec_from_file_location("pdb_wizard_dist", SRC)
 pw = importlib.util.module_from_spec(spec)
-sys.modules["pdb_wizard_dist"] = pw  # dataclasses look the module up while it loads; not "pdb_wizard", which is the package
+sys.modules["pdb_wizard_dist"] = (
+    pw  # dataclasses look the module up while it loads; not "pdb_wizard", which is the package
+)
 spec.loader.exec_module(pw)
 
 
@@ -35,6 +38,7 @@ def cell_warnings(mol, **kw):
 
 # ---- PBC geometry --------------------------------------------------------------------
 
+
 def test_perpendicular_widths_orthorhombic():
     assert np.allclose(pw.PBC(20, 25, 30, 90, 90, 90).perpendicular_widths(), [20, 25, 30])
 
@@ -53,6 +57,7 @@ def test_shortest_lattice_vector():
 
 
 # ---- validate_for_mpmc box checks -----------------------------------------------------
+
 
 def test_big_orthorhombic_box_has_no_cell_warnings():
     assert cell_warnings(make_mol(25, 25, 25)) == []
@@ -89,6 +94,7 @@ def test_custom_cutoff():
 
 # ---- extend_axis and the TUI dialog ------------------------------------------------------
 
+
 def test_extend_axis_counts_extra_copies():
     mol = make_mol(10, 10, 10)
     pw.extend_axis(mol, 0, 1)  # classic "extend 1 time" doubles the axis
@@ -114,8 +120,9 @@ async def test_tui_extend_dialog_counts_like_classic():
             if len(app.molecule.atoms) == 24:
                 break
         assert len(app.molecule.atoms) == 2 * 2 * 3 * 2
-        assert (app.molecule.pbc.a, app.molecule.pbc.b, app.molecule.pbc.c) == \
-            pytest.approx((20, 30, 20))
+        assert (app.molecule.pbc.a, app.molecule.pbc.b, app.molecule.pbc.c) == pytest.approx(
+            (20, 30, 20)
+        )
 
 
 @pytest.mark.asyncio

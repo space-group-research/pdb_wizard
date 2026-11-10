@@ -2,6 +2,7 @@
 
 Run from the repo root:  python -m pytest tests/
 """
+
 import importlib.util
 import io
 import itertools
@@ -16,7 +17,9 @@ import pytest
 SRC = Path(__file__).resolve().parent.parent / "dist" / "pdb_wizard.py"  # built by conftest.py
 spec = importlib.util.spec_from_file_location("pdb_wizard_dist", SRC)
 pw = importlib.util.module_from_spec(spec)
-sys.modules["pdb_wizard_dist"] = pw  # dataclasses look the module up while it loads; not "pdb_wizard", which is the package
+sys.modules["pdb_wizard_dist"] = (
+    pw  # dataclasses look the module up while it loads; not "pdb_wizard", which is the package
+)
 spec.loader.exec_module(pw)
 
 
@@ -37,8 +40,9 @@ def framework(pbc):
     return pw.Molecule(atoms=atoms, pbc=pbc)
 
 
-@pytest.mark.parametrize("cell", [(20, 20, 20, 90, 90, 90), (20.88, 13.3, 17.1, 90, 99.9, 90),
-                                  (15, 17, 19, 70, 80, 100)])
+@pytest.mark.parametrize(
+    "cell", [(20, 20, 20, 90, 90, 90), (20.88, 13.3, 17.1, 90, 99.9, 90), (15, 17, 19, 70, 80, 100)]
+)
 def test_no_overlaps_in_skewed_cells(cell):
     """Every site respects the distance rule against the framework and each other,
     measured with the minimum image, also across the periodic boundary."""
@@ -172,8 +176,13 @@ def test_new_water_models_geometry(name):
 # Thorough checks
 # ======================================================================
 
-SKEWED = [(20, 20, 20, 90, 90, 90), (20.88, 13.3, 17.1, 90, 99.9, 90), (15, 17, 19, 70, 80, 100),
-          (18, 18, 18, 60, 60, 60), (16, 18, 20, 50, 60, 70)]
+SKEWED = [
+    (20, 20, 20, 90, 90, 90),
+    (20.88, 13.3, 17.1, 90, 99.9, 90),
+    (15, 17, 19, 70, 80, 100),
+    (18, 18, 18, 60, 60, 60),
+    (16, 18, 20, 50, 60, 70),
+]
 ALL_MODELS = sorted(pw.SORBATE_MODELS)
 
 
@@ -236,7 +245,10 @@ def test_framework_without_sigma_uses_vdw_radius():
     placed = pw.insert_sorbates(mol, "h2o_spce", 6, seed=23)
     fw = np.array([a.x for a in mol.atoms])
     for mk in placed:  # O vs carbon: 0.85 * (3.166/2 + C vdW radius)
-        assert brute_force_dists(pbc, mk[[0]], fw).min() >= 0.85 * (3.166 / 2 + mol.atoms[0].vdw) - 1e-9
+        assert (
+            brute_force_dists(pbc, mk[[0]], fw).min()
+            >= 0.85 * (3.166 / 2 + mol.atoms[0].vdw) - 1e-9
+        )
 
 
 def test_phahst_sites_only_use_the_floor():
@@ -337,6 +349,7 @@ def test_center_of_mass_is_the_placement_center():
 
 # ---- templates ------------------------------------------------------------------------
 
+
 def test_template_reader_variants(tmp_path):
     f = tmp_path / "co2.pqr"
     f.write_text(
@@ -362,7 +375,9 @@ def test_template_packs_like_the_built_in_model(tmp_path):
     (tmp_path / "w.pqr").write_text("\n".join(lines) + "\nEND\n")
     t = pw.read_sorbate_template(tmp_path / "w.pqr")
     params = [(s.atomtype, s.charge, s.polarizability, s.epsilon, s.sigma) for s in t.sites]
-    assert params == [(s.atomtype, s.charge, s.polarizability, s.epsilon, s.sigma) for s in model.sites]
+    assert params == [
+        (s.atomtype, s.charge, s.polarizability, s.epsilon, s.sigma) for s in model.sites
+    ]
     mol = framework(pw.PBC(20, 20, 20, 90, 90, 90))
     a = pw.insert_sorbates(mol, t, 4, seed=33)
     b = pw.insert_sorbates(mol, model, 4, seed=33)
@@ -370,6 +385,7 @@ def test_template_packs_like_the_built_in_model(tmp_path):
 
 
 # ---- formatting and the MPMC file -----------------------------------------------------
+
 
 def test_formatted_records_round_trip_through_the_reader(tmp_path):
     pbc = pw.PBC(20.88, 13.3, 17.1, 90, 99.9, 90)
@@ -383,9 +399,11 @@ def test_formatted_records_round_trip_through_the_reader(tmp_path):
     with open(out) as fh:
         atoms, pbc2 = pw.read_pdb(fh, str(out))
     assert pbc2 is not None and np.allclose(pbc2.basis_matrix, pbc.basis_matrix, atol=1e-3)
-    back = np.array([a.x for a in atoms[-len(lines):]])
+    back = np.array([a.x for a in atoms[-len(lines) :]])
     assert np.allclose(back, np.vstack(placed), atol=1e-5)
-    assert [a.charge for a in atoms[-5:]] == [s.charge for s in pw.SORBATE_MODELS["h2o_tip5p"].sites]
+    assert [a.charge for a in atoms[-5:]] == [
+        s.charge for s in pw.SORBATE_MODELS["h2o_tip5p"].sites
+    ]
 
 
 def test_remark_lines_carry_the_basis():
@@ -414,6 +432,7 @@ def test_box_id_without_sorbates_and_with_odd_lines():
 
 # ---- classic menu ---------------------------------------------------------------------
 
+
 def run_menu(monkeypatch, mol, answers):
     feed = iter(answers)
     monkeypatch.setattr("builtins.input", lambda *_: next(feed))
@@ -421,8 +440,13 @@ def run_menu(monkeypatch, mol, answers):
 
 
 def count_m_molecules(path):
-    return len({ln.split()[5] for ln in Path(path).read_text().splitlines()
-                if ln.startswith("ATOM") and ln.split()[4] == "M"})
+    return len(
+        {
+            ln.split()[5]
+            for ln in Path(path).read_text().splitlines()
+            if ln.startswith("ATOM") and ln.split()[4] == "M"
+        }
+    )
 
 
 def test_menu_by_number_and_count(monkeypatch, tmp_path, capsys):
@@ -482,6 +506,7 @@ def test_main_loop_option_10_reaches_the_menu(monkeypatch):
 
 
 # ---- TUI steps, called on a stand-in for the app -------------------------------------
+
 
 class FakeApp:
     def __init__(self, mol=None):
@@ -562,8 +587,13 @@ def test_tui_count_cancel(value):
 
 
 def m_molecules(text):
-    return len({ln.split()[5] for ln in text.splitlines()
-                if ln.startswith("ATOM") and ln.split()[4] == "M"})
+    return len(
+        {
+            ln.split()[5]
+            for ln in text.splitlines()
+            if ln.startswith("ATOM") and ln.split()[4] == "M"
+        }
+    )
 
 
 def test_tui_write_inserts_n_molecules():
@@ -594,12 +624,13 @@ def test_tui_write_without_sorbate():
 
 # ---- model data -----------------------------------------------------------------------
 
+
 def test_new_models_details():
     tip5p = pw.SORBATE_MODELS["h2o_tip5p"]
     lp = [np.array([s.x, s.y, s.z]) for s in tip5p.sites if s.atomtype == "LP"]
     h = [np.array([s.x, s.y, s.z]) for s in tip5p.sites if s.atomtype == "HYD"]
     assert all(np.linalg.norm(v) == pytest.approx(0.70, abs=1e-4) for v in lp)
-    assert np.degrees(np.arccos(np.dot(lp[0], lp[1]) / 0.70 ** 2)) == pytest.approx(109.47, abs=0.02)
+    assert np.degrees(np.arccos(np.dot(lp[0], lp[1]) / 0.70**2)) == pytest.approx(109.47, abs=0.02)
     assert np.dot(lp[0] + lp[1], h[0] + h[1]) < 0  # lone pairs opposite the hydrogens
     dc97 = pw.SORBATE_MODELS["h2o_dc97"]
     m = next(s for s in dc97.sites if s.atomtype == "M")
@@ -612,6 +643,7 @@ def test_new_models_details():
 
 
 # ---- optional: real MPMC (pytest --mpmc /path/to/mpmc) --------------------------------
+
 
 @pytest.fixture
 def mpmc_bin(request):
@@ -627,10 +659,21 @@ def test_mpmc_reads_the_packed_file_with_sane_energy(tmp_path, mpmc_bin):
     lines = pw.format_inserted_sorbates("h2o_spce", placed, start_atom_id=len(mol.atoms) + 1)
     pw.write_mpmc_pdb(mol, str(tmp_path / "in.pqr"), sorbate_lines=lines)
     (tmp_path / "sp.inp").write_text(
-        "job_name sp\nensemble total_energy\ntemperature 298\npqr_input in.pqr\nread_pqr_box on\n")
-    out = subprocess.run([mpmc_bin, "sp.inp"], cwd=tmp_path, capture_output=True, text=True,
-                         timeout=300).stdout
+        "job_name sp\nensemble total_energy\ntemperature 298\npqr_input in.pqr\nread_pqr_box on\n"
+    )
+    out = subprocess.run(
+        [mpmc_bin, "sp.inp"], cwd=tmp_path, capture_output=True, text=True, timeout=300
+    ).stdout
     assert "basis[2] successfully read" in out
     energy = float(out.split("potential energy =")[1].split()[0])
     # 0.85*sigma lets a few contacts be mildly repulsive (~1e3 K); a real overlap is 1e10+ K
     assert -1e6 < energy < 1e4
+
+
+def test_format_rejects_a_placement_with_the_wrong_site_count():
+    """Without zip(strict=True) (Python 3.10+), the length check is explicit."""
+    good = pw.insert_sorbates(
+        pw.Molecule(atoms=[], pbc=pw.PBC(20, 20, 20, 90, 90, 90)), "h2o_spce", 1, seed=1
+    )
+    with pytest.raises(ValueError, match="has 2 sites"):
+        pw.format_inserted_sorbates("h2o_spce", [good[0][:2]], start_atom_id=1)

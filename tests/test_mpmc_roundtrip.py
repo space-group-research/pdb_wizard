@@ -2,6 +2,7 @@
 
 Run from the repo root:  python -m pytest tests/
 """
+
 import importlib.util
 import io
 import logging
@@ -16,7 +17,9 @@ import pytest
 SRC = Path(__file__).resolve().parent.parent / "dist" / "pdb_wizard.py"  # built by conftest.py
 spec = importlib.util.spec_from_file_location("pdb_wizard_dist", SRC)
 pw = importlib.util.module_from_spec(spec)
-sys.modules["pdb_wizard_dist"] = pw  # dataclasses look the module up while it loads; not "pdb_wizard", which is the package
+sys.modules["pdb_wizard_dist"] = (
+    pw  # dataclasses look the module up while it loads; not "pdb_wizard", which is the package
+)
 spec.loader.exec_module(pw)
 
 # Two framework atoms, then two DC97 waters (molecules 2 and 3; M sites massless)
@@ -46,8 +49,11 @@ def read(text=MPMC, name="in.pqr"):
 def written_records(mol, **kw):
     buf = io.StringIO()
     pw.write_mpmc_pdb(mol, buf, **kw)
-    return [ln.split() for ln in buf.getvalue().splitlines()
-            if ln.startswith("ATOM") and " BOX " not in ln]
+    return [
+        ln.split()
+        for ln in buf.getvalue().splitlines()
+        if ln.startswith("ATOM") and " BOX " not in ln
+    ]
 
 
 def test_reader_keeps_mpmc_metadata():
@@ -65,8 +71,12 @@ def test_no_warning_for_dummy_sites(caplog):
     assert "Unrecognised element" not in caplog.text
     # a real unknown element with mass still warns
     with caplog.at_level(logging.WARNING):
-        read(MPMC.replace("Cu   MOF F    1   1.000 1.000 1.000  63.546",
-                          "Qq   MOF F    1   1.000 1.000 1.000  63.546"))
+        read(
+            MPMC.replace(
+                "Cu   MOF F    1   1.000 1.000 1.000  63.546",
+                "Qq   MOF F    1   1.000 1.000 1.000  63.546",
+            )
+        )
     assert "Qq x1" in caplog.text
 
 
@@ -112,8 +122,9 @@ def test_extend_axis_gives_copies_new_molecule_ids():
 def test_new_sorbates_continue_after_existing_ones():
     mol = read()
     placed = pw.insert_sorbates(mol, "h2o_dc97", 2, seed=1)
-    lines = pw.format_inserted_sorbates("h2o_dc97", placed, len(mol.atoms) + 1,
-                                        start_mol_id=2 + pw.mpmc_movable_count(mol))
+    lines = pw.format_inserted_sorbates(
+        "h2o_dc97", placed, len(mol.atoms) + 1, start_mol_id=2 + pw.mpmc_movable_count(mol)
+    )
     recs = written_records(mol, sorbate_lines=lines)
     assert [r[5] for r in recs if r[4] == "M"][::4] == ["2", "3", "4", "5"]
 
@@ -136,18 +147,26 @@ CELL = "CRYST1   20.000   20.000   20.000  90.00  90.00  90.00 P 1           1\n
 
 def mpmc_line(i, name, res, flag, mol, xyz, mass, q=0.0, alpha=0.0, eps=0.0, sig=0.0):
     x, y, z = xyz
-    return (f"ATOM {i} {name} {res} {flag} {mol} {x} {y} {z} {mass} {q} {alpha} {eps} {sig}"
-            " 0.0 0.0 0.0 0.0 0.0\n")
+    return (
+        f"ATOM {i} {name} {res} {flag} {mol} {x} {y} {z} {mass} {q} {alpha} {eps} {sig}"
+        " 0.0 0.0 0.0 0.0 0.0\n"
+    )
 
 
-BOX = ("REMARK BOX BASIS[0] = 20.0 0.0 0.0\nREMARK BOX BASIS[1] = 0.0 20.0 0.0\n"
-       "REMARK BOX BASIS[2] = 0.0 0.0 20.0\nEND\n")
+BOX = (
+    "REMARK BOX BASIS[0] = 20.0 0.0 0.0\nREMARK BOX BASIS[1] = 0.0 20.0 0.0\n"
+    "REMARK BOX BASIS[2] = 0.0 0.0 20.0\nEND\n"
+)
 
 
 @pytest.mark.parametrize("flag", ["A", "S", "T"])
 def test_other_mpmc_flags_are_read_and_stay_framework(flag):
-    text = CELL + mpmc_line(1, "C", "MOF", "F", 1, (1, 1, 1), 12.011) + \
-        mpmc_line(2, "Ar", "AR", flag, 2, (5, 5, 5), 39.948) + BOX
+    text = (
+        CELL
+        + mpmc_line(1, "C", "MOF", "F", 1, (1, 1, 1), 12.011)
+        + mpmc_line(2, "Ar", "AR", flag, 2, (5, 5, 5), 39.948)
+        + BOX
+    )
     mol = read(text)
     assert mol.atoms[1].mpmc_flag == flag
     assert [r[4] for r in written_records(mol)] == ["F", "F"]
@@ -156,17 +175,30 @@ def test_other_mpmc_flags_are_read_and_stay_framework(flag):
 def test_non_numeric_molecule_id_and_plain_pdb():
     mol = read(CELL + mpmc_line(1, "OXY", "H2O", "M", "x", (1, 1, 1), 15.9994) + BOX)
     assert mol.atoms[0].mpmc_flag == "M" and mol.atoms[0].mpmc_mol is None
-    plain = ("CRYST1   10.000   10.000   10.000  90.00  90.00  90.00 P 1           1\n"
-             "ATOM      1  C   LIG A   1       1.000   1.000   1.000  1.00  0.00           C\n")
+    plain = (
+        "CRYST1   10.000   10.000   10.000  90.00  90.00  90.00 P 1           1\n"
+        "ATOM      1  C   LIG A   1       1.000   1.000   1.000  1.00  0.00           C\n"
+    )
     atom = read(plain, "x.pdb").atoms[0]
-    assert (atom.mpmc_flag, atom.mpmc_mol, atom.mpmc_res, atom.file_mass) == (None, None, None, None)
+    assert (atom.mpmc_flag, atom.mpmc_mol, atom.mpmc_res, atom.file_mass) == (
+        None,
+        None,
+        None,
+        None,
+    )
 
 
-@pytest.mark.parametrize("name,mass,warns", [("LP", 1e-6, False), ("M", 0.0, False),
-                                             ("Qz", 0.6, True), ("Qz", 40.0, True)])
+@pytest.mark.parametrize(
+    "name,mass,warns",
+    [("LP", 1e-6, False), ("M", 0.0, False), ("Qz", 0.6, True), ("Qz", 40.0, True)],
+)
 def test_dummy_site_threshold(caplog, name, mass, warns):
-    text = CELL + mpmc_line(1, "C", "MOF", "F", 1, (1, 1, 1), 12.011) + \
-        mpmc_line(2, name, "MOL", "M", 2, (5, 5, 5), mass) + BOX
+    text = (
+        CELL
+        + mpmc_line(1, "C", "MOF", "F", 1, (1, 1, 1), 12.011)
+        + mpmc_line(2, name, "MOL", "M", 2, (5, 5, 5), mass)
+        + BOX
+    )
     with caplog.at_level(logging.WARNING):
         read(text)
     assert ("Unrecognised element" in caplog.text) == warns
@@ -175,8 +207,12 @@ def test_dummy_site_threshold(caplog, name, mass, warns):
 def test_framework_masses_stay_element_masses_movable_keep_file_masses():
     """Framework atoms are written with element masses, as before (MPMC uses them for
     wt%); movable sites keep the file's masses (e.g. a deuterated sorbate)."""
-    text = CELL + mpmc_line(1, "H", "MOF", "F", 1, (1, 1, 1), 2.014) + \
-        mpmc_line(2, "D", "D2O", "M", 2, (5, 5, 5), 2.014) + BOX
+    text = (
+        CELL
+        + mpmc_line(1, "H", "MOF", "F", 1, (1, 1, 1), 2.014)
+        + mpmc_line(2, "D", "D2O", "M", 2, (5, 5, 5), 2.014)
+        + BOX
+    )
     recs = written_records(read(text))
     assert float(recs[0][9]) == pytest.approx(pw.get_element("H").mass, abs=1e-4)
     assert float(recs[1][9]) == pytest.approx(2.014)
@@ -226,9 +262,13 @@ def test_extend_twice_keeps_ids_unique():
 
 
 def test_extra_frozen_molecules_become_framework():
-    text = CELL + mpmc_line(1, "C", "MOF", "F", 1, (1, 1, 1), 12.011) + \
-        mpmc_line(2, "C", "LNK", "F", 7, (9, 9, 9), 12.011) + \
-        mpmc_line(3, "OXY", "H2O", "M", 2, (5, 5, 5), 15.9994) + BOX
+    text = (
+        CELL
+        + mpmc_line(1, "C", "MOF", "F", 1, (1, 1, 1), 12.011)
+        + mpmc_line(2, "C", "LNK", "F", 7, (9, 9, 9), 12.011)
+        + mpmc_line(3, "OXY", "H2O", "M", 2, (5, 5, 5), 15.9994)
+        + BOX
+    )
     recs = written_records(read(text))
     assert [(r[4], r[5]) for r in recs] == [("F", "1"), ("F", "1"), ("M", "2")]
 
@@ -242,11 +282,15 @@ def test_write_read_write_is_stable():
 
 
 def test_residue_fallback_and_interleaved_records():
-    text = (CELL + mpmc_line(1, "C", "MOF", "F", 1, (1, 1, 1), 12.011)
-            + mpmc_line(2, "OXY", "H2O", "M", 3, (5, 5, 5), 15.9994)
-            + mpmc_line(3, "OXY", "H2O", "M", 2, (9, 9, 9), 15.9994)
-            + mpmc_line(4, "HYD", "H2O", "M", 3, (5.757, 4.414, 5), 1.008)
-            + mpmc_line(5, "HYD", "H2O", "M", 2, (9.757, 8.414, 9), 1.008) + BOX)
+    text = (
+        CELL
+        + mpmc_line(1, "C", "MOF", "F", 1, (1, 1, 1), 12.011)
+        + mpmc_line(2, "OXY", "H2O", "M", 3, (5, 5, 5), 15.9994)
+        + mpmc_line(3, "OXY", "H2O", "M", 2, (9, 9, 9), 15.9994)
+        + mpmc_line(4, "HYD", "H2O", "M", 3, (5.757, 4.414, 5), 1.008)
+        + mpmc_line(5, "HYD", "H2O", "M", 2, (9.757, 8.414, 9), 1.008)
+        + BOX
+    )
     mol = read(text)
     mol.atoms[2].mpmc_res = None
     mv = [r for r in written_records(mol) if r[4] == "M"]
@@ -265,9 +309,13 @@ def test_movable_count_tracks_deletions():
 
 def test_isotherm_sorbate_continues_after_existing_waters(tmp_path):
     mol = read()
-    dirs = pw.generate_isotherm(mol, "h2o_tip3p", 298.0, [0.1], str(tmp_path), sorbate_pos=(15, 5, 15))
+    dirs = pw.generate_isotherm(
+        mol, "h2o_tip3p", 298.0, [0.1], str(tmp_path), sorbate_pos=(15, 5, 15)
+    )
     text = (Path(dirs[0]) / "input.pqr").read_text()
-    m_ids = [ln.split()[5] for ln in text.splitlines() if ln.startswith("ATOM") and ln.split()[4] == "M"]
+    m_ids = [
+        ln.split()[5] for ln in text.splitlines() if ln.startswith("ATOM") and ln.split()[4] == "M"
+    ]
     assert m_ids == ["2"] * 4 + ["3"] * 4 + ["4"] * 3
 
 
@@ -276,14 +324,19 @@ def test_menu_insert_into_a_file_with_waters(monkeypatch, tmp_path):
     feed = iter(["h2o_tip3p", "2", str(out)])
     monkeypatch.setattr("builtins.input", lambda *_: next(feed))
     pw._menu_insert_sorbates(read())
-    ids = [ln.split()[5] for ln in out.read_text().splitlines()
-           if ln.startswith("ATOM") and ln.split()[4] == "M"]
+    ids = [
+        ln.split()[5]
+        for ln in out.read_text().splitlines()
+        if ln.startswith("ATOM") and ln.split()[4] == "M"
+    ]
     assert ids == ["2"] * 4 + ["3"] * 4 + ["4"] * 3 + ["5"] * 3
 
 
 def test_tui_default_mpmc_name_is_pqr(monkeypatch):
     seen = []
-    monkeypatch.setattr(pw, "FileSaveModal", lambda *a, **k: seen.append(k.get("default")) or "modal")
+    monkeypatch.setattr(
+        pw, "FileSaveModal", lambda *a, **k: seen.append(k.get("default")) or "modal"
+    )
 
     class App:
         filepath = "/data/mof.cif"
@@ -293,11 +346,13 @@ def test_tui_default_mpmc_name_is_pqr(monkeypatch):
 
         def _mpmc_step_write(self, value):
             pass
+
     pw.PdbWizardApp.__dict__["_mpmc_step_filename"](App())
     assert seen == ["/data/mof_out_mpmc.pqr"]
 
 
 # ---- optional: real MPMC (pytest --mpmc /path/to/mpmc) --------------------------------
+
 
 @pytest.fixture
 def mpmc_bin(request):
@@ -311,9 +366,11 @@ def mpmc_energy(mpmc_bin, workdir, pqr_text):
     workdir.mkdir()
     (workdir / "in.pqr").write_text(pqr_text)
     (workdir / "sp.inp").write_text(
-        "job_name sp\nensemble total_energy\ntemperature 298\npqr_input in.pqr\nread_pqr_box on\n")
-    out = subprocess.run([mpmc_bin, "sp.inp"], cwd=workdir, capture_output=True, text=True,
-                         timeout=300).stdout
+        "job_name sp\nensemble total_energy\ntemperature 298\npqr_input in.pqr\nread_pqr_box on\n"
+    )
+    out = subprocess.run(
+        [mpmc_bin, "sp.inp"], cwd=workdir, capture_output=True, text=True, timeout=300
+    ).stdout
     return float(out.split("potential energy =")[1].split()[0])
 
 
@@ -344,13 +401,18 @@ def test_short_mpmc_record_has_no_file_mass():
     text = CELL + "ATOM 1 C MOF F 1 1.0 1.0 1.0\n" + BOX
     atom = read(text).atoms[0]
     assert atom.file_mass is None and atom.mpmc_flag == "F"
-    assert float(written_records(read(text))[0][9]) == pytest.approx(pw.get_element("C").mass, abs=1e-4)
+    assert float(written_records(read(text))[0][9]) == pytest.approx(
+        pw.get_element("C").mass, abs=1e-4
+    )
 
 
 # ---- framework-only edits leave the movable molecules' model alone ---------------------
 
+
 def water_params(mol):
-    return [(a.name, a.charge, a.alpha, a.epsilon, a.sigma) for a in mol.atoms if a.mpmc_flag == "M"]
+    return [
+        (a.name, a.charge, a.alpha, a.epsilon, a.sigma) for a in mol.atoms if a.mpmc_flag == "M"
+    ]
 
 
 @pytest.mark.parametrize("ff_idx", [0, 1])
@@ -394,7 +456,11 @@ def test_classic_charges_prompt_covers_framework_only(monkeypatch, tmp_path):
     feed = iter(["y", str(tmp_path / "q.txt"), "n", str(out)])
     monkeypatch.setattr("builtins.input", lambda *_: next(feed))
     pw._write_mpmc_options(mol)
-    recs = [ln.split() for ln in out.read_text().splitlines() if ln.startswith("ATOM") and " BOX " not in ln]
+    recs = [
+        ln.split()
+        for ln in out.read_text().splitlines()
+        if ln.startswith("ATOM") and " BOX " not in ln
+    ]
     assert sorted(float(r[10]) for r in recs if r[4] == "F") == [-0.7, 0.7]
     assert [float(r[10]) for r in recs if r[4] == "M" and r[2] == "M"] == [-1.038, -1.038]
 
@@ -411,6 +477,7 @@ def test_tui_charges_step_covers_framework_only(tmp_path):
 
         def _mpmc_step_ask_ff(self):
             steps.append("ff")
+
     app = App()
     pw.PdbWizardApp.__dict__["_mpmc_step_charges_file"](app, {"path": str(tmp_path / "q.txt")})
     assert steps == ["ff"] and [a.charge for a in app.molecule.atoms[:2]] == [0.7, -0.7]

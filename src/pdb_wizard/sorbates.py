@@ -430,7 +430,8 @@ def format_inserted_sorbates(model: SorbateModel | str, placements: list[np.ndar
     lines, atom_id = [], start_atom_id
     for k, xyz in enumerate(placements):
         if len(xyz) != len(model.sites):
-            raise ValueError(f"placement {k} has {len(xyz)} sites, {model.name} has {len(model.sites)}")
+            raise ValueError(f"placement {k} has {len(xyz)} sites, "
+                             f"{model.name} has {len(model.sites)}")
         for site, pos in zip(model.sites, xyz):  # no strict=: must run on Python 3.7
             lines.append(_sorbate_atom_line(model, site, atom_id, start_mol_id + k, pos))
             atom_id += 1

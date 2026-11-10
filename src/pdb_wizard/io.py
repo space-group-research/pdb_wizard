@@ -1225,7 +1225,8 @@ def write_mpmc_pdb(
             for atom in atoms:
                 x = ref + pbc.wrap(atom.x - ref)
                 parts.append(
-                    f"ATOM {next_atom_id:>6} {atom.name:<4} {(atom.mpmc_res or 'MOL'):<3} M {k + 2:>4}    "
+                    f"ATOM {next_atom_id:>6} {atom.name:<4} {(atom.mpmc_res or 'MOL'):<3} M"
+                    f" {k + 2:>4}    "
                     f"{x[0]:>10.6f} {x[1]:>10.6f} {x[2]:>10.6f}"
                     f" {_mpmc_mass(atom):>9.5f} {atom.charge:>9.5f}"
                     f" {atom.alpha:>9.5f} {atom.epsilon:>9.5f} {atom.sigma:>9.5f}"
@@ -1248,7 +1249,8 @@ def write_mpmc_pdb(
         parts.extend(f"CONECT {next_atom_id + i:>4} {next_atom_id + j:>4}\n"
                      for i, j in pbc.edges())
         # MPMC's read_pqr_box needs the "=": it checks that the 4th token is "=".
-        parts.extend(f"REMARK BOX BASIS[{r_idx}] = {row[0]:20.14f} {row[1]:20.14f} {row[2]:20.14f}\n"
+        parts.extend(f"REMARK BOX BASIS[{r_idx}] = "
+                     f"{row[0]:20.14f} {row[1]:20.14f} {row[2]:20.14f}\n"
                      for r_idx, row in enumerate(pbc.basis_matrix))
         parts.append("END\n")
         fh.write("".join(parts))

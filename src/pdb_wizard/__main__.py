@@ -245,6 +245,10 @@ def main() -> None:
         "--classic", action="store_true",
         help="use the classic text menu instead of the interactive TUI viewer",
     )
+    parser.add_argument(
+        "--gui", action="store_true",
+        help="open the desktop window (needs PySide6: pip install \"pdb-wizard[gui]\")",
+    )
 
     # Batch-mode analysis flags
     batch = parser.add_argument_group("batch analysis (run and exit, no TUI)")
@@ -321,7 +325,10 @@ def main() -> None:
         sys.exit(0)
 
     # ---- interactive mode (existing) ----
-    if args.classic:
+    if args.gui:
+        from pdb_wizard.gui import run_gui
+        sys.exit(run_gui(args.file))
+    elif args.classic:
         if not args.file:
             parser.error("Classic menu requires a file argument.")
         from pdb_wizard.menu import run_classic

@@ -6,6 +6,7 @@ checks the file that lands on disk. Needs textual and pytest-asyncio.
 
 Run from the repo root:  python -m pytest tests/
 """
+
 import importlib.util
 import io
 import sys
@@ -21,7 +22,9 @@ pytest.importorskip("pytest_asyncio")
 SRC = Path(__file__).resolve().parent.parent / "dist" / "pdb_wizard.py"  # built by conftest.py
 spec = importlib.util.spec_from_file_location("pdb_wizard_dist", SRC)
 pw = importlib.util.module_from_spec(spec)
-sys.modules["pdb_wizard_dist"] = pw  # dataclasses look the module up while it loads; not "pdb_wizard", which is the package
+sys.modules["pdb_wizard_dist"] = (
+    pw  # dataclasses look the module up while it loads; not "pdb_wizard", which is the package
+)
 spec.loader.exec_module(pw)
 
 
@@ -37,8 +40,11 @@ def framework(charged=True):
 
 
 def records(path):
-    return [ln.split() for ln in Path(path).read_text().splitlines()
-            if ln.startswith("ATOM") and " BOX " not in ln]
+    return [
+        ln.split()
+        for ln in Path(path).read_text().splitlines()
+        if ln.startswith("ATOM") and " BOX " not in ln
+    ]
 
 
 async def wait_for(pilot, cond, what, tries=100):
@@ -86,7 +92,7 @@ async def export(pilot, app, *, keep_charges=True, ff="#ff-none", sorbate=None, 
         await pilot.click("#sorb-skip")
     else:
         await choose_sorbate(pilot, app, sorbate)
-        for answer in ([count] if isinstance(count, str) else count):
+        for answer in [count] if isinstance(count, str) else count:
             await type_into(pilot, app, pw.InputModal, "#modal-input", answer, "#input-ok")
     await type_into(pilot, app, pw.FileSaveModal, "#file-input", str(path), "#file-save")
     await wait_for(pilot, lambda: Path(path).exists(), f"{path} to be written")
@@ -101,8 +107,13 @@ async def test_tui_inserts_n_waters(tmp_path):
     recs = records(out)
     assert len({r[5] for r in recs if r[4] == "M"}) == 5
     assert sum(r[4] == "F" for r in recs) == 64
-    assert all(ln.split()[3] == "=" for ln in out.read_text().splitlines() if ln.startswith("REMARK BOX"))
-    assert [float(r[10]) for r in recs if r[4] == "F"][:2] in ([-0.1, 0.1], [0.1, -0.1])  # charges kept
+    assert all(
+        ln.split()[3] == "=" for ln in out.read_text().splitlines() if ln.startswith("REMARK BOX")
+    )
+    assert [float(r[10]) for r in recs if r[4] == "F"][:2] in (
+        [-0.1, 0.1],
+        [0.1, -0.1],
+    )  # charges kept
 
 
 @pytest.mark.asyncio
@@ -162,7 +173,9 @@ async def test_tui_cancel_at_the_count_writes_nothing(tmp_path):
         await choose_sorbate(pilot, app, "h2o_tip3p")
         await on_screen(pilot, app, pw.InputModal)
         await pilot.click("#input-cancel")
-        await wait_for(pilot, lambda: not isinstance(app.screen, pw.InputModal), "the dialog to close")
+        await wait_for(
+            pilot, lambda: not isinstance(app.screen, pw.InputModal), "the dialog to close"
+        )
         await pilot.pause(0.2)
         assert not isinstance(app.screen, pw.FileSaveModal)
     assert not list(tmp_path.glob("*.pqr"))

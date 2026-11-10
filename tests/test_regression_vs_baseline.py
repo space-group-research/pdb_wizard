@@ -18,6 +18,7 @@ Options (see conftest.py):
 Without a usable baseline (e.g. after merging, when main *is* this code) the tests skip.
 Run from the repo root:  python -m pytest tests/test_pdb_wizard_regression.py
 """
+
 import contextlib
 import copy
 import importlib.util
@@ -69,6 +70,7 @@ def bw(request, tmp_path_factory):
 
 # ---- the structures ---------------------------------------------------------------------
 
+
 def _synthetic(tmp):
     """Small structures in every input dialect, made without pdb_wizard."""
     b = np.radians(99.0)
@@ -78,31 +80,61 @@ def _synthetic(tmp):
     els = ["C", "O", "H", "N", "Cu", "Zn", "F", "Cl", "S"]
     files = {}
     cryst = "CRYST1   12.000   10.000   11.000  90.00  99.00  90.00 P 1           1\n"
-    remark = "".join(f"REMARK BOX BASIS[{i}] = {r[0]:.6f} {r[1]:.6f} {r[2]:.6f}\n"
-                     for i, r in enumerate(basis))
-    lines = [f"ATOM {i + 1} {els[i % 9]} MOF F 1 {x:.4f} {y:.4f} {z:.4f} 12.0 {0.1 * (-1) ** i:.2f}"
-             f" 0.5 30.0 3.2 0.0 0.0 0.0 0.0 0.0\n" for i, (x, y, z) in enumerate(xyz)]
+    remark = "".join(
+        f"REMARK BOX BASIS[{i}] = {r[0]:.6f} {r[1]:.6f} {r[2]:.6f}\n" for i, r in enumerate(basis)
+    )
+    lines = [
+        f"ATOM {i + 1} {els[i % 9]} MOF F 1 {x:.4f} {y:.4f} {z:.4f} 12.0 {0.1 * (-1) ** i:.2f}"
+        f" 0.5 30.0 3.2 0.0 0.0 0.0 0.0 0.0\n"
+        for i, (x, y, z) in enumerate(xyz)
+    ]
     files["framework_mpmc.pqr"] = cryst + "".join(lines) + remark + "END\n"
-    water = ("ATOM 900 OXY H2O M 2 6.0 5.0 2.0 15.9994 0.0 0.0 91.84 3.234 0 0 0 0 0\n"
-             "ATOM 901 HYD H2O M 2 6.757 4.414 2.0 1.008 0.519 0.0 0.0 0.0 0 0 0 0 0\n"
-             "ATOM 902 HYD H2O M 2 5.243 4.414 2.0 1.008 0.519 0.0 0.0 0.0 0 0 0 0 0\n"
-             "ATOM 903 M H2O M 2 6.0 4.785 2.0 0.0 -1.038 1.444 0.0 0.0 0 0 0 0 0\n")
+    water = (
+        "ATOM 900 OXY H2O M 2 6.0 5.0 2.0 15.9994 0.0 0.0 91.84 3.234 0 0 0 0 0\n"
+        "ATOM 901 HYD H2O M 2 6.757 4.414 2.0 1.008 0.519 0.0 0.0 0.0 0 0 0 0 0\n"
+        "ATOM 902 HYD H2O M 2 5.243 4.414 2.0 1.008 0.519 0.0 0.0 0.0 0 0 0 0 0\n"
+        "ATOM 903 M H2O M 2 6.0 4.785 2.0 0.0 -1.038 1.444 0.0 0.0 0 0 0 0 0\n"
+    )
     files["framework_water_mpmc.pqr"] = cryst + "".join(lines) + water + remark + "END\n"
-    files["plain.pdb"] = cryst + "".join(
-        f"ATOM  {i + 1:5d} {els[i % 9]:>2}   LIG A   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00"
-        f"          {els[i % 9]:>2}\n"
-        for i, (x, y, z) in enumerate(xyz)) + "END\n"
-    files["pdb2pqr.pqr"] = "".join(
-        f"ATOM  {i + 1:5d}  {els[i % 9]:<3} LIG A   1    {x:8.3f}{y:8.3f}{z:8.3f}"
-        f" {0.1 * (-1) ** i:7.4f} 1.7000\n"
-        for i, (x, y, z) in enumerate(xyz)) + "END\n"
+    files["plain.pdb"] = (
+        cryst
+        + "".join(
+            f"ATOM  {i + 1:5d} {els[i % 9]:>2}   LIG A   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00"
+            f"          {els[i % 9]:>2}\n"
+            for i, (x, y, z) in enumerate(xyz)
+        )
+        + "END\n"
+    )
+    files["pdb2pqr.pqr"] = (
+        "".join(
+            f"ATOM  {i + 1:5d}  {els[i % 9]:<3} LIG A   1    {x:8.3f}{y:8.3f}{z:8.3f}"
+            f" {0.1 * (-1) ** i:7.4f} 1.7000\n"
+            for i, (x, y, z) in enumerate(xyz)
+        )
+        + "END\n"
+    )
     files["mol.xyz"] = f"{len(xyz)}\ncomment\n" + "".join(
-        f"{els[i % 9]} {x:.5f} {y:.5f} {z:.5f}\n" for i, (x, y, z) in enumerate(xyz))
-    cif = ["data_test", "_cell_length_a 12.0", "_cell_length_b 10.0", "_cell_length_c 11.0",
-           "_cell_angle_alpha 90", "_cell_angle_beta 99", "_cell_angle_gamma 90",
-           "_symmetry_space_group_name_H-M 'P 1'", "loop_", "_atom_site_label",
-           "_atom_site_type_symbol", "_atom_site_fract_x", "_atom_site_fract_y", "_atom_site_fract_z"]
-    cif += [f"{els[i % 9]}{i} {els[i % 9]} {f[0]:.5f} {f[1]:.5f} {f[2]:.5f}" for i, f in enumerate(frac)]
+        f"{els[i % 9]} {x:.5f} {y:.5f} {z:.5f}\n" for i, (x, y, z) in enumerate(xyz)
+    )
+    cif = [
+        "data_test",
+        "_cell_length_a 12.0",
+        "_cell_length_b 10.0",
+        "_cell_length_c 11.0",
+        "_cell_angle_alpha 90",
+        "_cell_angle_beta 99",
+        "_cell_angle_gamma 90",
+        "_symmetry_space_group_name_H-M 'P 1'",
+        "loop_",
+        "_atom_site_label",
+        "_atom_site_type_symbol",
+        "_atom_site_fract_x",
+        "_atom_site_fract_y",
+        "_atom_site_fract_z",
+    ]
+    cif += [
+        f"{els[i % 9]}{i} {els[i % 9]} {f[0]:.5f} {f[1]:.5f} {f[2]:.5f}" for i, f in enumerate(frac)
+    ]
     files["cell.cif"] = "\n".join(cif) + "\n"
     out = []
     for name, text in files.items():
@@ -114,8 +146,17 @@ def _synthetic(tmp):
 def pytest_generate_tests(metafunc):  # noqa: D103 (pytest hook, kept local to this module)
     if "structure" not in metafunc.fixturenames:
         return
-    ids = ["synthetic:" + n for n in ("framework_mpmc.pqr", "framework_water_mpmc.pqr", "plain.pdb",
-                                     "pdb2pqr.pqr", "mol.xyz", "cell.cif")]
+    ids = [
+        "synthetic:" + n
+        for n in (
+            "framework_mpmc.pqr",
+            "framework_water_mpmc.pqr",
+            "plain.pdb",
+            "pdb2pqr.pqr",
+            "mol.xyz",
+            "cell.cif",
+        )
+    ]
     corpus = metafunc.config.getoption("--corpus")
     if corpus:
         for f in sorted(Path(corpus).rglob("*")):
@@ -178,8 +219,22 @@ def has_movable(path):
 
 
 def atom_rows(mol):
-    return [(a.name, a.element.symbol, *np.round(a.x, 10), a.charge, a.alpha, a.epsilon, a.sigma,
-             a.c6, a.c8, a.c10, a.mass) for a in mol.atoms]
+    return [
+        (
+            a.name,
+            a.element.symbol,
+            *np.round(a.x, 10),
+            a.charge,
+            a.alpha,
+            a.epsilon,
+            a.sigma,
+            a.c6,
+            a.c8,
+            a.c10,
+            a.mass,
+        )
+        for a in mol.atoms
+    ]
 
 
 def cell(mol):
@@ -195,7 +250,11 @@ def normalize_mpmc(text):
 
 def same_failure(a, b):
     """Both raised, the same kind of error (each module has its own exception classes)."""
-    return isinstance(a, Exception) and isinstance(b, Exception) and type(a).__name__ == type(b).__name__
+    return (
+        isinstance(a, Exception)
+        and isinstance(b, Exception)
+        and type(a).__name__ == type(b).__name__
+    )
 
 
 def raises_like(e):
@@ -210,6 +269,7 @@ def mpmc_text(mod, mol, **kw):
 
 
 # ---- reading ----------------------------------------------------------------------------
+
 
 def test_read_is_unchanged(bw, structure):
     (b, blog), (p, plog) = read_both(bw, structure)
@@ -228,13 +288,19 @@ def test_read_is_unchanged(bw, structure):
 
 # ---- writing ----------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("fmt", ["xyz", "pdb", "cif", "poscar", "lammps"])
 def test_other_writers_are_unchanged(bw, structure, fmt):
     (b, _), (p, _) = read_both(bw, structure)
     if isinstance(b, Exception):
         return
-    writer = {"xyz": "write_xyz", "pdb": "write_standard_pdb", "cif": "write_cif",
-              "poscar": "write_poscar", "lammps": "write_lammps_data"}[fmt]
+    writer = {
+        "xyz": "write_xyz",
+        "pdb": "write_standard_pdb",
+        "cif": "write_cif",
+        "poscar": "write_poscar",
+        "lammps": "write_lammps_data",
+    }[fmt]
     outs = []
     for mod, mol in ((bw, b), (pw, p)):
         buf = io.StringIO()
@@ -260,11 +326,16 @@ def test_mpmc_export_is_unchanged_for_frameworks(bw, structure):
     if not has_movable(structure):
         assert new == old
         return
+
     # with movable molecules the old writer froze them into the framework (the bug):
     # the framework records must still match, as a set, and the waters must be M now
     def rows(text, flag):
-        return sorted(tuple(ln.split()[2:3] + ln.split()[6:14]) for ln in text.splitlines()
-                      if ln.startswith("ATOM") and " BOX " not in ln and ln.split()[4] == flag)
+        return sorted(
+            tuple(ln.split()[2:3] + ln.split()[6:14])
+            for ln in text.splitlines()
+            if ln.startswith("ATOM") and " BOX " not in ln and ln.split()[4] == flag
+        )
+
     moved = [a for a in p.atoms if a.mpmc_flag == "M"]
     assert len(rows(new, "M")) == len(moved) > 0
     assert set(rows(new, "F")) <= set(rows(old, "F"))
@@ -278,14 +349,20 @@ def test_mpmc_export_with_a_sorbate_line_is_unchanged(bw, structure):
     (b, _), (p, _) = read_both(bw, structure)
     if isinstance(b, Exception) or b.pbc is None:
         return
-    line = bw.format_sorbate_pqr("h2o_tip3p", 1.0, 1.0, 1.0, mol_id=2, start_atom_id=len(b.atoms) + 1)
-    assert pw.format_sorbate_pqr("h2o_tip3p", 1.0, 1.0, 1.0, mol_id=2,
-                                 start_atom_id=len(p.atoms) + 1) == line
-    assert normalize_mpmc(mpmc_text(pw, p, sorbate_lines=line)) == \
-        normalize_mpmc(mpmc_text(bw, b, sorbate_lines=line))
+    line = bw.format_sorbate_pqr(
+        "h2o_tip3p", 1.0, 1.0, 1.0, mol_id=2, start_atom_id=len(b.atoms) + 1
+    )
+    assert (
+        pw.format_sorbate_pqr("h2o_tip3p", 1.0, 1.0, 1.0, mol_id=2, start_atom_id=len(p.atoms) + 1)
+        == line
+    )
+    assert normalize_mpmc(mpmc_text(pw, p, sorbate_lines=line)) == normalize_mpmc(
+        mpmc_text(bw, b, sorbate_lines=line)
+    )
 
 
 # ---- editing ----------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("ff_idx", [0, 1])
 def test_force_fields_are_unchanged_on_frameworks(bw, structure, ff_idx):
@@ -360,6 +437,7 @@ def test_info_is_unchanged(bw, structure):
 
 # ---- through MPMC -----------------------------------------------------------------------
 
+
 @pytest.fixture
 def mpmc_bin(request):
     path = request.config.getoption("--mpmc") or shutil.which("mpmc")
@@ -373,9 +451,13 @@ def mpmc_energy(mpmc_bin, workdir, text, basis):
     (workdir / "in.pqr").write_text(text)
     (workdir / "sp.inp").write_text(
         "job_name sp\nensemble total_energy\ntemperature 298\npqr_input in.pqr\n"
-        + "".join(f"basis{i + 1} {r[0]:.10f} {r[1]:.10f} {r[2]:.10f}\n" for i, r in enumerate(basis)))
-    out = subprocess.run([mpmc_bin, "sp.inp"], cwd=workdir, capture_output=True, text=True,
-                         timeout=600).stdout
+        + "".join(
+            f"basis{i + 1} {r[0]:.10f} {r[1]:.10f} {r[2]:.10f}\n" for i, r in enumerate(basis)
+        )
+    )
+    out = subprocess.run(
+        [mpmc_bin, "sp.inp"], cwd=workdir, capture_output=True, text=True, timeout=600
+    ).stdout
     if "potential energy =" not in out:
         return out.strip().splitlines()[-1:]  # compare the failure instead
     return float(out.split("potential energy =")[1].split()[0])
@@ -388,9 +470,22 @@ def test_mpmc_energy_is_unchanged_for_frameworks(bw, structure, tmp_path, mpmc_b
     (b, _), (p, _) = read_both(bw, structure)
     if isinstance(b, Exception) or b.pbc is None or not any(a.sigma > 0 for a in b.atoms):
         return
-    line = bw.format_sorbate_pqr("h2o_tip3p", *map(float, b.pbc.basis_matrix.sum(axis=0) / 2),
-                                 mol_id=2, start_atom_id=len(b.atoms) + 1)
-    e_old = mpmc_energy(mpmc_bin, tmp_path / "old", mpmc_text(bw, b, sorbate_lines=line), b.pbc.basis_matrix)
-    e_new = mpmc_energy(mpmc_bin, tmp_path / "new", mpmc_text(pw, p, sorbate_lines=line), p.pbc.basis_matrix)
-    both_nan = isinstance(e_old, float) and isinstance(e_new, float) and np.isnan(e_old) and np.isnan(e_new)
+    line = bw.format_sorbate_pqr(
+        "h2o_tip3p",
+        *map(float, b.pbc.basis_matrix.sum(axis=0) / 2),
+        mol_id=2,
+        start_atom_id=len(b.atoms) + 1,
+    )
+    e_old = mpmc_energy(
+        mpmc_bin, tmp_path / "old", mpmc_text(bw, b, sorbate_lines=line), b.pbc.basis_matrix
+    )
+    e_new = mpmc_energy(
+        mpmc_bin, tmp_path / "new", mpmc_text(pw, p, sorbate_lines=line), p.pbc.basis_matrix
+    )
+    both_nan = (
+        isinstance(e_old, float)
+        and isinstance(e_new, float)
+        and np.isnan(e_old)
+        and np.isnan(e_new)
+    )
     assert both_nan or e_new == e_old  # some example frameworks give nan in MPMC; then both must
