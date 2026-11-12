@@ -48,6 +48,7 @@ MODULE_ORDER = [
     "sorbates",
     "panels",
     "viewer",
+    "menu_tools",
     "menu",
     "gui_tools",
     "gui",

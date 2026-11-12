@@ -45,6 +45,19 @@ EXPECTED_MAIN = [
     (10, "insert sorbates and write MPMC .pdb"),
 ]
 
+# Added after the original numbers (never renumbering them) so old input scripts keep
+# working; tests/test_classic_parity.py covers what these do.
+ADDED_MAIN = [
+    (11, "analysis"),
+    (12, "edit structure"),
+    (13, "write other formats and pictures"),
+    (14, "generate simulation inputs"),
+    (15, "isotherm results"),
+    (16, "fetch a structure from a database"),
+    (17, "undo the last change"),
+    (18, "open another file"),
+]
+
 EXPECTED_GEOM = [
     (1, "list bonds"),
     (2, "list close vdw contacts"),
@@ -55,6 +68,10 @@ EXPECTED_GEOM = [
     (7, "edit hydrogen bond distances"),
     (8, "preview with VMD"),
     (9, "back to main menu"),
+]
+ADDED_GEOM = [
+    (10, "list dihedrals"),
+    (11, "measure a distance, angle or dihedral"),
 ]
 
 # The trajectory/movie menu has no original to mirror, so it follows the same
@@ -70,6 +87,17 @@ EXPECTED_MOVIE = [
     (7, "write MPMC .pdb (single frame)"),
     (8, "write standardized .pdb (all frames)"),
     (9, "quit"),
+]
+ADDED_MOVIE = [
+    (10, "insert sorbates and write MPMC .pdb (single frame)"),
+    (11, "analysis (whole trajectory)"),
+    (12, "edit structure (single frame)"),
+    (13, "write other formats and pictures (single frame)"),
+    (14, "generate simulation inputs (single frame)"),
+    (15, "isotherm results"),
+    (16, "fetch a structure from a database"),
+    (17, "undo the last change"),
+    (18, "open another file"),
 ]
 
 
@@ -118,7 +146,7 @@ class TestMainMenuMatchesOriginal:
         # "9" quits immediately after the menu is shown once.
         prompts = _capture_menu(_main_loop_single, ["9"], _mol(), "test.pdb")
         main = next(p for p in prompts if "geometry analysis" in p)
-        assert _parse_options(main) == EXPECTED_MAIN
+        assert _parse_options(main) == EXPECTED_MAIN + ADDED_MAIN
 
     def test_main_menu_has_no_nested_submenu_labels(self):
         prompts = _capture_menu(_main_loop_single, ["9"], _mol(), "test.pdb")
@@ -134,7 +162,7 @@ class TestGeometryMenuMatchesOriginal:
         # "9" returns to the main menu immediately.
         prompts = _capture_menu(_menu_geom_analysis, ["9"], _mol())
         geom = next(p for p in prompts if "list bonds" in p)
-        assert _parse_options(geom) == EXPECTED_GEOM
+        assert _parse_options(geom) == EXPECTED_GEOM + ADDED_GEOM
 
     def test_geometry_menu_dropped_list_molecules(self):
         prompts = _capture_menu(_menu_geom_analysis, ["9"], _mol())
@@ -146,7 +174,7 @@ class TestMovieMenu:
     def test_movie_menu_ordering_and_labels(self):
         prompts = _capture_menu(_main_loop_movie, ["9"], _traj(3), "traj.xyz")
         m = next(p for p in prompts if "geometry analysis" in p)
-        assert _parse_options(m) == EXPECTED_MOVIE
+        assert _parse_options(m) == EXPECTED_MOVIE + ADDED_MOVIE
 
     def test_option_one_is_not_a_no_op(self):
         # Regression: the old movie menu's first option did nothing (`pass`).
