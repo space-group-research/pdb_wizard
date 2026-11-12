@@ -49,6 +49,7 @@ from pdb_wizard.inputgen import (
 )
 from pdb_wizard.molecule import Molecule, set_atom_ids
 from pdb_wizard.reduce_cell import identify_framework_and_sorbates, reduce_to_primitive
+from pdb_wizard.sorbates import SORBATE_MODELS
 from pdb_wizard.templates import ENGINES
 
 try:
@@ -490,11 +491,20 @@ class AnalysisDialog(_QDialogT):
                 spin.setValue(value)
             _couple_range(self.start_spin, self.end_spin)
             cells += [("Start frame", self.start_spin), ("End frame", self.end_spin)]
-        for k, (label, w) in enumerate(cells):
-            row, col = divmod(k, 3)
+        # Element/name pairs read best two to a row; the frame range starts its own row.
+        ncols = 2 if any(f.kind.startswith("name:") for f in spec.fields) else 3
+        row = col = 0
+        for label, w in cells:
+            if w is self.start_spin and col:
+                row, col = row + 1, 0
             if label:
                 grid.addWidget(QtWidgets.QLabel(label), row, 2 * col)
             grid.addWidget(w, row, 2 * col + 1)
+            col += 1
+            if col == ncols:
+                row, col = row + 1, 0
+        for c in range(ncols):
+            grid.setColumnStretch(2 * c + 1, 1)
         lay.addLayout(grid)
         buttons = QtWidgets.QHBoxLayout()
         self.compute_button = QtWidgets.QPushButton("Compute")
@@ -1056,9 +1066,10 @@ class InputGeneratorDialog(_QDialogT):
             value = saved.get(var.name, var.default)
             if var.kind == "select":
                 w = QtWidgets.QComboBox()
-                w.addItems(list(var.choices or ()))
-                if value in (var.choices or ()):
-                    w.setCurrentText(value)
+                for choice in var.choices or ():
+                    model = SORBATE_MODELS.get(choice) if var.name == "sorbate" else None
+                    w.addItem(f"{choice}  –  {model.description}" if model else choice, choice)
+                w.setCurrentIndex(max(w.findData(value), 0))
             elif var.kind == "int":
                 w = QtWidgets.QSpinBox()
                 w.setRange(int(var.min_val) if var.min_val is not None else 0,
@@ -1089,7 +1100,7 @@ class InputGeneratorDialog(_QDialogT):
             if isinstance(w, QtWidgets.QSpinBox):
                 raw = w.value()
             elif isinstance(w, QtWidgets.QComboBox):
-                raw = w.currentText()
+                raw = w.currentData()
             else:
                 raw = w.text()
             try:

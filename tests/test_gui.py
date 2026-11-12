@@ -180,6 +180,7 @@ def test_pack_sorbates_adds_movable_waters_and_undo(hkust):
 
 
 def test_pack_then_save_mpmc_keeps_them_movable(hkust, tmp_path):
+    hkust.sorbate_combo.setCurrentIndex(hkust.sorbate_combo.findData("h2o_dc97"))
     hkust.sorbate_count.setValue(4)
     hkust.pack_sorbates()
     out = tmp_path / "packed.pqr"
@@ -250,6 +251,7 @@ def test_force_field_leaves_sorbates_alone(hkust):
 
 
 def test_charges_file_framework_only(hkust, tmp_path):
+    hkust.sorbate_combo.setCurrentIndex(hkust.sorbate_combo.findData("h2o_dc97"))
     hkust.sorbate_count.setValue(2)
     hkust.pack_sorbates()
     q = tmp_path / "q.txt"
@@ -264,7 +266,7 @@ def test_charges_file_framework_only(hkust, tmp_path):
 
 
 def test_supercell_and_wrap_with_undo(hkust):
-    hkust.extend_spins[0].setValue(1)
+    hkust.extend_spins[0].setValue(2)
     hkust.build_supercell()
     assert len(hkust.mol.atoms) == 1248
     assert hkust.mol.pbc.a == pytest.approx(2 * 26.343, abs=1e-3)

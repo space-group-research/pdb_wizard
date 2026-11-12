@@ -133,6 +133,42 @@ COLOR_MODES = [("element", "Element"), ("charge", "Charge"), ("residue", "Residu
                ("chain", "Chain"), ("index", "Index")]
 BACKGROUNDS = [("theme", "Window theme"), ("dark", "Dark"), ("light", "Light")]
 _DEFAULT_BOND_RADIUS = 0.11
+CONTROLS_HELP = """\
+Mouse (in the 3D view)
+  Left drag            rotate
+  Right or middle drag pan (left drag also pans in pan mode)
+  Wheel                zoom
+  Click an atom        select it (shown in the Structure panel and the Atoms table)
+  Shift+click atoms    2 atoms give a distance, 3 an angle (in the status bar)
+  Double click         reset the view
+
+Keys (click the 3D view first)
+  Arrows or h j k l    rotate (pan in pan mode)
+  + / -  or  K / J     zoom in / out
+  , / .                roll
+  r                    reset the view
+  c                    centre the structure
+  t                    pan mode on/off
+  v                    next style
+  C                    next colour mode
+  i                    dark/light background
+  b                    bonds
+  #                    atom numbers
+  w                    hide water
+  P                    polyhedra
+  O                    orthographic / perspective
+  m                    measure mode: click two atoms to pin their distance
+
+Trajectories
+  [ / ]                previous / next frame
+  Home / End           first / last frame
+  Space                play / pause
+
+Window
+  Ctrl+O open    Ctrl+S save as    Ctrl+Z undo    Ctrl+W close tab
+  Ctrl+D database    Ctrl+I input generator    Ctrl+E export image
+  Ctrl+G geometry panel    F1 this help
+"""
 _LICORICE_BOND_RADIUS = 0.15
 
 
@@ -1007,6 +1043,7 @@ class MainWindow(_QMainWindow):
         self._build_actions()
         self.statusBar().showMessage("Ready")
         self._update_title()
+        self._update_supercell_preview()
         if path:
             self.open_path(path)
 
@@ -1057,10 +1094,13 @@ class MainWindow(_QMainWindow):
         self.extend_spins = []
         for axis in "abc":
             spin = QtWidgets.QSpinBox()
-            spin.setRange(0, 19)
-            spin.setToolTip("Extra copies along this axis (1 doubles it, as in the classic menu)")
+            spin.setRange(1, 20)
+            spin.setToolTip("Unit cells along this axis in the result (1 leaves it as it is)")
+            spin.valueChanged.connect(lambda _: self._update_supercell_preview())
             self.extend_spins.append(spin)
-            form.addRow(f"Extra copies along {axis}", spin)
+            form.addRow(f"Cells along {axis}", spin)
+        self.supercell_preview = QtWidgets.QLabel()
+        form.addRow(self.supercell_preview)
         btn = QtWidgets.QPushButton("Build supercell")
         btn.clicked.connect(self.build_supercell)
         form.addRow(btn)
@@ -1082,7 +1122,7 @@ class MainWindow(_QMainWindow):
         for name, model in SORBATE_MODELS.items():
             self.sorbate_combo.addItem(f"{model.description}", name)
         self.sorbate_combo.addItem("From an MPMC .pqr file…", "__file__")
-        idx = self.sorbate_combo.findData("h2o_dc97")
+        idx = self.sorbate_combo.findData("h2_bss")
         self.sorbate_combo.setCurrentIndex(max(idx, 0))
         form.addRow("Model", self.sorbate_combo)
         self.sorbate_count = QtWidgets.QSpinBox()
@@ -1132,7 +1172,6 @@ class MainWindow(_QMainWindow):
         form.addRow(note)
         tools.addTab(page, "Charges && FF")
 
-        tools.setCurrentIndex(2)
         self.tools = tools
         dock.setWidget(tools)
         dock.setMinimumWidth(300)
@@ -1212,6 +1251,7 @@ class MainWindow(_QMainWindow):
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setDefaultSectionSize(self.table.fontMetrics().height() + 8)
         self.table.clicked.connect(lambda idx: self._selected(idx.row(), from_table=True))
         dock.setWidget(self.table)
         self.table_dock = dock
@@ -1248,7 +1288,7 @@ class MainWindow(_QMainWindow):
             menus[menu].addAction(act)
             if toolbar:
                 bar.addAction(act)
-            self.actions_by_name[text.replace("&", "").rstrip("…")] = act
+            self.actions_by_name[text.split("\t")[0].replace("&", "").rstrip("…")] = act
             return act
 
         sp = QtWidgets.QStyle
@@ -1268,27 +1308,42 @@ class MainWindow(_QMainWindow):
         self.undo_action = action(e, "&Undo", self.undo, "Ctrl+Z", sp.SP_ArrowBack, True)
         self.undo_action.setEnabled(False)
         menus[e].addSeparator()
+        action(e, "&Build supercell…", self._show_supercell_tab)
+        action(e, "&Reduce supercell…", lambda: self.reduce_supercell())
         action(e, "Wrap (&centred)", lambda: self.wrap(False))
         action(e, "Wrap (&forward)", lambda: self.wrap(True))
+        action(e, "Update unit c&ell…", lambda: self.update_cell())
+        menus[e].addSeparator()
         action(e, "&Sort atoms", self.sort_atoms)
-        action(e, "&Extend axis (supercell)", self._show_supercell_tab)
+        action(e, "Substitute ele&ment…", lambda: self.substitute_element())
         action(e, "Delete &lone atoms", self.delete_lone_atoms)
         action(e, "Edit &H distances…", lambda: self.edit_h_distances())
-        action(e, "Update unit &cell…", lambda: self.update_cell())
-        action(e, "Su&bstitute element…", lambda: self.substitute_element())
-        action(e, "&Reduce supercell…", lambda: self.reduce_supercell())
-        menus[e].addSeparator()
-        action(e, "Generate &QEq charges", self.qeq_charges)
         bar.addSeparator()
 
         action(v, "&Reset view", self.view.reset_view, "R", sp.SP_BrowserReload, True)
-        action(v, "C&entre", self.view.center_view)
+        action(v, "C&entre\tC", self.view.center_view)
         action(v, "Zoom &in", lambda: self.view.zoom(1.2), "Ctrl++")
         action(v, "Zoom &out", lambda: self.view.zoom(1 / 1.2), "Ctrl+-")
         menus[v].addSeparator()
-        action(v, "Cycle &style", lambda: self._key_option(self.view.cycle_style))
-        action(v, "Cycle &colour mode", lambda: self._key_option(self.view.cycle_color_mode))
-        action(v, "Clear &measurements", self.view.clear_measurements)
+        action(v, "Cycle &style\tV", lambda: self._key_option(self.view.cycle_style))
+        action(v, "Cycle &colour mode\tShift+C",
+               lambda: self._key_option(self.view.cycle_color_mode))
+        menus[v].addSeparator()
+        # The same options as the View tab; the keys work while the 3D view has the focus.
+        self.view_actions = {}
+        for attr, label in (("show_bonds", "&Bonds\tB"), ("show_cell", "&Unit cell"),
+                            ("show_atom_numbers", "Atom &numbers\t#"),
+                            ("hide_water", "Hide &water\tW"),
+                            ("show_polyhedra", "&Polyhedra\tShift+P"),
+                            ("orthographic", "Ortho&graphic\tShift+O"),
+                            ("depth_cue", "Dept&h cueing"),
+                            ("measure_mode", "&Measure mode\tM")):
+            act = action(v, label, lambda on, a=attr: self._menu_toggle_view(a, on),
+                         checkable=True)
+            act.setChecked(bool(getattr(self.view, attr)))
+            self.view_actions[attr] = act
+        action(v, "Clear measurements", self.view.clear_measurements)
+        menus[v].addSeparator()
         self.density_action = action(v, "Show 3D &density", lambda: None, checkable=True)
         self.density_action.setChecked(True)
         self.density_action.toggled.connect(self._toggle_density)
@@ -1299,11 +1354,10 @@ class MainWindow(_QMainWindow):
             menus[v].addAction(dock.toggleViewAction())
         self.geometry_dock.toggleViewAction().setShortcut(QtGui.QKeySequence("Ctrl+G"))
 
-        action(t, "Build &supercell", self.build_supercell)
-        action(t, "&Pack sorbates", lambda: self.pack_sorbates())
-        action(t, "Apply &force field", self.apply_force_field)
+        action(t, "&Pack sorbates…", lambda: self._show_tools_tab(2))
+        action(t, "&Force field and charges…", lambda: self._show_tools_tab(3))
         action(t, "Load &charges…", lambda: self.load_charges())
-        action(t, "&QEq charges", self.qeq_charges)
+        action(t, "Generate &QEq charges", self.qeq_charges)
         menus[t].addSeparator()
         action(t, "&Input generator…", lambda: self.open_tool("input_generator"), "Ctrl+I")
 
@@ -1314,16 +1368,15 @@ class MainWindow(_QMainWindow):
                            ("coordination", "&Coordination number"),
                            ("hbonds", "&Hydrogen bonds"), ("msd", "&Mean squared displacement"),
                            ("rmsd", "RMSD vs &time"), ("gyration", "Radius of &gyration"),
-                           ("density", "&Density profile"), ("density3d", "3D density &map"),
+                           ("density", "&Density profile"), ("density3d", "&3D density map"),
                            ("pxrd", "Powder &XRD"), (None, None),
                            ("energy_plot", "&Energy plot (energy.dat)…"),
-                           ("isotherm_plot", "Plot is&otherm results…"),
-                           ("input_generator", "I&nput generator…"),
-                           ("db_search", "Fetch from data&base…")):
+                           ("isotherm_plot", "Plot is&otherm results…")):
             if key is None:
                 menus[a].addSeparator()
             else:
                 action(a, label, lambda _=False, k=key: self.open_tool(k))
+        action("&Help", "&Keyboard and mouse", self.show_controls, "F1")
         action("&Help", "&About PDB Wizard", self.about)
 
         # the terminal viewer's trajectory keys
@@ -1425,6 +1478,7 @@ class MainWindow(_QMainWindow):
         self.geometry.set_molecule(self.mol)
         self._refresh_info()
         self._update_title()
+        self._update_supercell_preview()
         for d in self._live_windows():  # tool windows work on their tab's current atoms
             if getattr(d, "doc", None) is self.doc and hasattr(d, "set_structure"):
                 d.set_structure(self.doc.mol, self.doc.frames)
@@ -1488,6 +1542,10 @@ class MainWindow(_QMainWindow):
         else:
             self._set_view(attr, on, invalidate=True)
 
+    def _menu_toggle_view(self, attr: str, on: bool) -> None:
+        self._toggle_view(attr, on)
+        self._sync_view_controls()
+
     def set_style(self, name: str) -> None:
         self.view.set_style(name)
         self._sync_view_controls()
@@ -1509,9 +1567,11 @@ class MainWindow(_QMainWindow):
             combo.setCurrentIndex(combo.findData(value))
             combo.blockSignals(False)
         for attr, chk in self.view_checks.items():
-            chk.blockSignals(True)
-            chk.setChecked(bool(getattr(v, attr)))
-            chk.blockSignals(False)
+            for box in (chk, getattr(self, "view_actions", {}).get(attr)):
+                if box is not None:
+                    box.blockSignals(True)
+                    box.setChecked(bool(getattr(v, attr)))
+                    box.blockSignals(False)
         s = self.sliders["bond_radius"]
         s.blockSignals(True)
         s.setValue(int(round(v.bond_radius * 100)))
@@ -1839,24 +1899,41 @@ class MainWindow(_QMainWindow):
 
     # ---- edits --------------------------------------------------------------------------
 
-    def _show_supercell_tab(self) -> None:
+    def _show_tools_tab(self, index: int) -> None:
         self.tools_dock.show()
-        self.tools.setCurrentIndex(1)
+        self.tools_dock.raise_()
+        self.tools.setCurrentIndex(index)
+
+    def _show_supercell_tab(self) -> None:
+        self._show_tools_tab(1)
 
     def build_supercell(self) -> None:
         if not self._need_structure("A supercell", cell=True):
             return
         counts = [spin.value() for spin in self.extend_spins]
-        if not any(counts):
-            self.statusBar().showMessage("Set at least one axis above 0", 5000)
+        if all(n == 1 for n in counts):
+            self.statusBar().showMessage("Set at least one axis above 1", 5000)
             return
         self._checkpoint()
         for axis, n in enumerate(counts):
-            if n:
-                extend_axis(self.mol, axis, n)
+            if n > 1:
+                extend_axis(self.mol, axis, n - 1)  # extend_axis counts the extra copies
         self.view.reset_view()
-        size = "×".join(str(n + 1) for n in counts)
+        size = "×".join(str(n) for n in counts)
+        for spin in self.extend_spins:
+            spin.setValue(1)
         self._changed(f"Built a {size} supercell: {len(self.mol.atoms)} atoms")
+
+    def _update_supercell_preview(self) -> None:
+        counts = [spin.value() for spin in self.extend_spins]
+        mol = self.mol
+        if mol is None or not mol.atoms or not self.view.has_cell():
+            self.supercell_preview.setText("Needs a structure with a unit cell")
+            return
+        n = len(mol.atoms) * counts[0] * counts[1] * counts[2]
+        size = " × ".join(str(c) for c in counts)
+        note = " (no change)" if n == len(mol.atoms) else ""
+        self.supercell_preview.setText(f"Result: {size} cells, {n:,} atoms{note}")
 
     def wrap(self, forward: bool) -> None:
         if not self._need_structure("Wrapping atoms", cell=True):
@@ -2184,6 +2261,10 @@ class MainWindow(_QMainWindow):
     def _toggle_density(self, on: bool) -> None:
         self.view.show_density = on
         self.view.update()
+
+    def show_controls(self):
+        """Help > Keyboard and mouse: everything the 3D view responds to."""
+        return self.report("Keyboard and mouse", CONTROLS_HELP)
 
     def about(self) -> None:
         QtWidgets.QMessageBox.about(

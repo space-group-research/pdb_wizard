@@ -431,7 +431,7 @@ def test_frame_bar_speed_label(qtbot):
 
 def test_gui_pack_after_a_supercell_uses_fresh_ids(window):
     window.open_path(str(Path(HKUST).parent / "HKUST-1_out_mpmc.pdb"))
-    for spin, n in zip(window.extend_spins, (1, 0, 0)):
+    for spin, n in zip(window.extend_spins, (2, 1, 1)):
         spin.setValue(n)
     window.build_supercell()
     window.sorbate_combo.setCurrentIndex(window.sorbate_combo.findData("h2o_tip3p"))

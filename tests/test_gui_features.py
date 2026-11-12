@@ -283,8 +283,9 @@ def test_substitute_element(hkust):
 def test_reduce_supercell(hkust, qtbot):
     w = hkust
     for spin in w.extend_spins:
-        spin.setValue(1)
+        spin.setValue(2)
     w.build_supercell()
+    w.sorbate_combo.setCurrentIndex(w.sorbate_combo.findData("h2o_dc97"))  # 4 sites
     w.sorbate_count.setValue(3)
     assert w.pack_sorbates() == 3
     dlg = ReduceCellDialog(w.mol, w)
@@ -750,12 +751,137 @@ def test_menus_list_every_tool(window):
     names = set(window.actions_by_name)
     for text in ("Radial distribution", "Powder XRD", "3D density map", "Energy plot (energy.dat)",
                  "Input generator", "Fetch from database", "Substitute element",
+                 "Keyboard and mouse", "Bonds", "Measure mode",
                  "Update unit cell", "Reduce supercell", "Edit H distances", "Delete lone atoms",
                  "Sort atoms", "Open frame in new tab", "Export rotation GIF", "Cycle style",
                  "Cycle colour mode", "Clear measurements", "Show 3D density"):
         assert text in names, text
     window.actions_by_name["Cycle style"].trigger()
     assert window.view.style_name == "licorice" and window.style_combo.currentData() == "licorice"
-    window.actions_by_name["Extend axis (supercell)"].trigger()
+    window.actions_by_name["Build supercell"].trigger()
     assert window.tools.currentIndex() == 1
+    window.actions_by_name["Pack sorbates"].trigger()
+    assert window.tools.currentIndex() == 2
+    window.actions_by_name["Force field and charges"].trigger()
+    assert window.tools.currentIndex() == 3
+
+
+def test_no_menu_entry_is_listed_twice(window):
+    """Each command lives in one menu, and no menu reuses an Alt-key letter."""
+    seen = {}
+    for top in window.menuBar().actions():
+        letters = {}
+        for act in top.menu().actions():
+            if act.isSeparator():
+                continue
+            text = act.text().split("\t")[0]
+            plain = text.replace("&", "").rstrip("…").lower()
+            assert plain not in seen, f"{plain!r} is in both {seen.get(plain)} and {top.text()}"
+            seen[plain] = top.text()
+            if "&" in text:
+                letter = text[text.index("&") + 1].lower()
+                assert letter not in letters, (top.text(), text, letters[letter])
+                letters[letter] = text
+    assert "generate qeq charges" in seen and "qeq charges" not in seen
+
+
+def test_window_opens_on_general_defaults(window):
+    """The first thing shown is the View tab, and the sorbate default is the group's
+    standard H2 model, not one user's water model."""
+    assert window.tools.currentIndex() == 0
+    assert window.sorbate_combo.currentData() == "h2_bss"
+    assert [s.value() for s in window.extend_spins] == [1, 1, 1]
+
+
+def test_supercell_counts_are_whole_cells(hkust):
+    w = hkust
+    assert "1 × 1 × 1 cells, 624 atoms (no change)" in w.supercell_preview.text()
+    w.build_supercell()
+    assert len(w.mol.atoms) == 624  # 1×1×1 does nothing
+    w.extend_spins[0].setValue(2)
+    w.extend_spins[2].setValue(3)
+    assert "2 × 1 × 3 cells, 3,744 atoms" in w.supercell_preview.text()
+    w.build_supercell()
+    assert len(w.mol.atoms) == 3744
+    assert w.mol.pbc.a == pytest.approx(2 * 26.343, abs=1e-3)
+    assert w.mol.pbc.c == pytest.approx(3 * 26.343, abs=1e-3)
+    assert [s.value() for s in w.extend_spins] == [1, 1, 1]  # ready for the next build
+    assert "3,744 atoms (no change)" in w.supercell_preview.text()
+    w.undo()
+    assert "624 atoms" in w.supercell_preview.text()
+
+
+def test_supercell_preview_without_a_cell(window):
+    assert "unit cell" in window.supercell_preview.text()
+
+
+def test_view_menu_toggles_stay_in_step_with_the_view_tab(hkust, qtbot):
+    w = hkust
+    for attr, act in w.view_actions.items():
+        assert act.isCheckable() and act.isChecked() == bool(getattr(w.view, attr)), attr
+    w.view_actions["show_bonds"].trigger()
+    assert not w.view.show_bonds and not w.view_checks["show_bonds"].isChecked()
+    w.view_checks["show_bonds"].setChecked(True)
+    w._sync_view_controls()
+    assert w.view.show_bonds and w.view_actions["show_bonds"].isChecked()
+    w.view.setFocus()
+    qtbot.keyClick(w.view, "w")  # the view's own key
+    assert w.view.hide_water and w.view_actions["hide_water"].isChecked()
+    assert w.view_checks["hide_water"].isChecked()
+    w.view_actions["measure_mode"].trigger()
+    assert w.view.measure_mode and w.view_checks["measure_mode"].isChecked()
+
+
+def test_controls_help_matches_the_view(hkust, qtbot):
+    """Every key the help lists does something, and the help is reachable from the menu."""
+    from pdb_wizard.gui import CONTROLS_HELP
+    dlg = hkust.actions_by_name["Keyboard and mouse"]
+    assert dlg.shortcut().toString() == "F1"
+    report = hkust.show_controls()
+    assert report.text.toPlainText().strip() == CONTROLS_HELP.strip()
+    v = hkust.view
+    for key, attr in (("b", "show_bonds"), ("#", "show_atom_numbers"), ("w", "hide_water"),
+                      ("P", "show_polyhedra"), ("O", "orthographic"), ("t", "pan_mode"),
+                      ("m", "measure_mode")):
+        assert f"\n  {key}  " in CONTROLS_HELP, key
+        before = getattr(v, attr)
+        qtbot.keyClicks(v, key)
+        assert getattr(v, attr) != before, key
+    style = v.style_name
+    qtbot.keyClicks(v, "v")
+    assert v.style_name != style
+
+
+def test_analysis_form_keeps_pairs_together(qtbot):
+    """Element and name of one atom type share a row; the frame range has its own."""
+    from pdb_wizard.atom import Atom
+    from pdb_wizard.molecule import Molecule
+    from pdb_wizard.pbc import PBC
+    frames = [Molecule(atoms=[Atom(0, 0, f * 0.1, "O"), Atom(1, 0, 0, "H")],
+                       pbc=PBC(10, 10, 10, 90, 90, 90)) for f in range(4)]
+    dlg = AnalysisDialog("rdf", frames[0], frames)
+    qtbot.addWidget(dlg)
+    grid = dlg.layout().itemAt(0).layout()
+
+    def row_of(w):
+        return grid.getItemPosition(grid.indexOf(w))[0]
+
+    assert row_of(dlg.inputs["el1"]) == row_of(dlg.inputs["name1"])
+    assert row_of(dlg.inputs["el2"]) == row_of(dlg.inputs["name2"])
+    assert row_of(dlg.inputs["el1"]) != row_of(dlg.inputs["el2"])
+    assert row_of(dlg.start_spin) == row_of(dlg.end_spin)
+    assert row_of(dlg.start_spin) > max(row_of(w) for w in dlg.inputs.values())
+
+
+def test_input_generator_names_the_sorbates(hkust, qtbot):
+    from pdb_wizard.gui_tools import InputGeneratorDialog
+    from pdb_wizard.sorbates import SORBATE_MODELS
+    dlg = InputGeneratorDialog(hkust.mol, "h.pdb", hkust)
+    qtbot.addWidget(dlg)
+    box = dlg.widgets["sorbate"]
+    assert box.count() == len(SORBATE_MODELS) and box.currentData() == "h2_bss"
+    assert SORBATE_MODELS["h2_bss"].description in box.currentText()
+    box.setCurrentIndex(box.findData("co2_trappe"))
+    assert dlg.values()["sorbate"] == "co2_trappe"
+    assert dlg.values()["ensemble"] == "uvt"
     assert QtWidgets.QApplication.instance() is not None
