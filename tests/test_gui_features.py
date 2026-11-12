@@ -32,6 +32,7 @@ from pdb_wizard.gui_tools import (  # noqa: E402
 )
 from pdb_wizard.inputgen import generate_engine_inputs  # noqa: E402
 from pdb_wizard.io import read_file  # noqa: E402
+from pdb_wizard.menu_tools import cm_signature  # noqa: E402
 from pdb_wizard.molecule import Molecule  # noqa: E402
 from pdb_wizard.pbc import PBC  # noqa: E402
 from pdb_wizard.reduce_cell import reduce_to_primitive  # noqa: E402
@@ -318,6 +319,168 @@ def test_edits_need_a_cell(window):
         assert "needs a unit cell" in window.warnings[-1]
 
 
+# ---- redo -------------------------------------------------------------------------------
+
+
+def history(w):
+    """(Undo enabled, Redo enabled)."""
+    return w.undo_action.isEnabled(), w.redo_action.isEnabled()
+
+
+def zinc(w):
+    return sum(a.element.symbol == "Zn" for a in w.mol.atoms)
+
+
+def test_redo_sits_under_undo_with_its_shortcuts(window):
+    w = window
+    edit = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Edit")
+    first, second = edit.actions()[:2]
+    assert first is w.undo_action and second is w.redo_action
+    assert w.actions_by_name["Redo"] is w.redo_action and w.redo_action.text() == "Re&do"
+    assert [s.toString() for s in w.redo_action.shortcuts()] == ["Ctrl+Shift+Z", "Ctrl+Y"]
+    bar = w.findChild(QtWidgets.QToolBar, "main")
+    tools = bar.actions()
+    assert tools.index(w.redo_action) == tools.index(w.undo_action) + 1
+    assert history(w) == (False, False)
+
+
+def test_undo_then_redo_restores_the_edits_exactly(hkust):
+    w = hkust
+    states = [cm_signature(w.mol)]
+    w.edit_coord(0, (1.25, 2.5, 3.75))
+    states.append(cm_signature(w.mol))
+    w.substitute_element("Cu", "Zn")
+    states.append(cm_signature(w.mol))
+    w.update_cell((27.0, 27.0, 27.0, 90.0, 90.0, 90.0))
+    states.append(cm_signature(w.mol))
+    assert history(w) == (True, False)
+    for k in (2, 1, 0):
+        w.undo()
+        assert cm_signature(w.mol) == states[k]
+    assert history(w) == (False, True)
+    for k in (1, 2, 3):
+        w.redo()
+        assert cm_signature(w.mol) == states[k]
+        assert w.statusBar().currentMessage() == "Redone"
+    assert history(w) == (True, False)
+    w.redo()  # nothing left to redo
+    assert cm_signature(w.mol) == states[3]
+    assert w.table_model.mol is w.mol and w.geometry.mol is w.mol
+    assert w.info_labels["a, b, c (Å)"].text().startswith("27.000")
+    w.undo()
+    w.undo()
+    w.redo()
+    assert cm_signature(w.mol) == states[2] and history(w) == (True, True)
+
+
+def test_redo_keys(hkust, qtbot):
+    w = hkust
+    w.substitute_element("Cu", "Zn")
+    w.view.setFocus()
+    ctrl = QtCore.Qt.ControlModifier
+    for key, mods in ((QtCore.Qt.Key_Z, ctrl | QtCore.Qt.ShiftModifier), (QtCore.Qt.Key_Y, ctrl)):
+        qtbot.keyClick(w.view, QtCore.Qt.Key_Z, ctrl)
+        assert zinc(w) == 0
+        qtbot.keyClick(w.view, key, mods)
+        assert zinc(w) == 48, key
+
+
+def test_tool_windows_follow_redo(hkust):
+    w = hkust
+    dlg = w.open_tool("coordination")
+    w.substitute_element("Cu", "Zn")
+    w.undo()
+    assert dlg.mol is w.mol
+    w.redo()
+    items = [dlg.inputs["center"].itemText(i) for i in range(dlg.inputs["center"].count())]
+    assert dlg.mol is w.mol and "Zn" in items and "Cu" not in items
+
+
+def test_a_new_edit_clears_redo_and_a_no_op_keeps_it(hkust, tmp_path):
+    w = hkust
+    w.edit_coord(0, (1.0, 2.0, 3.0))
+    moved = cm_signature(w.mol)
+    w.substitute_element("Cu", "Zn")
+    substituted = cm_signature(w.mol)
+    w.undo()
+    assert history(w) == (True, True) and len(w.doc.undo) == len(w.doc.redo) == 1
+    # edits that find nothing to do drop their checkpoint: both histories stay as they were
+    assert w.substitute_element("Xe", "Kr") == 0
+    charges = tmp_path / "five.txt"
+    charges.write_text("0.1\n0.2\n0.3\n0.4\n0.5\n")  # 624 atoms: does not divide
+    assert not w.load_charges(str(charges))
+    assert history(w) == (True, True) and len(w.doc.undo) == len(w.doc.redo) == 1
+    w.redo()
+    assert cm_signature(w.mol) == substituted
+    w.undo()
+    w.update_cell((27.0, 27.0, 27.0, 90.0, 90.0, 90.0))  # a real edit
+    assert history(w) == (True, False) and w.doc.redo == []
+    w.redo()
+    assert w.mol.pbc.a == 27.0 and zinc(w) == 0
+    w.undo()
+    assert cm_signature(w.mol) == moved
+
+
+def test_redo_is_per_tab(hkust):
+    w = hkust
+    w.substitute_element("Cu", "Zn")
+    w.undo()
+    assert history(w) == (False, True)
+    assert w.open_path(str(WOFOUR)) and w.doc_index == 1  # a new tab: its own history
+    assert history(w) == (False, False)
+    wofour = cm_signature(w.mol)
+    w.redo()  # the first tab's redo does not apply here
+    assert cm_signature(w.mol) == wofour
+    w.update_cell((30.0, 30.0, 30.0, 90.0, 90.0, 90.0))
+    assert history(w) == (True, False)
+    w.tab_bar.setCurrentIndex(0)
+    assert history(w) == (False, True)
+    w.redo()
+    assert zinc(w) == 48 and history(w) == (True, False)
+    w.undo()
+    w.tab_bar.setCurrentIndex(1)
+    assert history(w) == (True, False) and w.mol.pbc.a == 30.0
+    assert w.open_path(str(HKUST)) and w.doc_index == 2
+    w.substitute_element("Cu", "Zn")
+    w.undo()
+    w.tab_bar.setCurrentIndex(1)
+    w.close_tab(0)  # a background tab: the shown one keeps its history
+    assert w.doc.name == "WOFOUR-1-Ni.pqr" and history(w) == (True, False)
+    w.close_tab(0)  # the shown tab: the next one's history takes over
+    assert w.doc.name == "HKUST-1.pdb" and history(w) == (False, True)
+    w.redo()
+    assert zinc(w) == 48
+    w.undo()
+    w.close_tab(0)  # the last tab, with a redo pending: an empty tab with no history
+    assert w.mol is None and history(w) == (False, False)
+    assert w.open_path(str(HKUST)) and history(w) == (False, False)
+
+
+def test_redo_on_a_trajectory_frame(traj):
+    """Like undo, redo goes back to the frame that was edited."""
+    w = traj
+    w.set_frame(2)
+    others = {k: cm_signature(w.frames[k]) for k in (0, 5, 7)}
+    w.substitute_element("O", "N")
+    edited = cm_signature(w.frames[2])
+    w.set_frame(5)
+    w.undo()
+    assert w.doc.frame_idx == 2 and w.frame_bar.index == 2
+    assert {a.element.symbol for a in w.frames[2].atoms} == {"O", "H"}
+    w.set_frame(7)  # changing frames keeps the tab's history
+    assert history(w) == (False, True)
+    w.redo()
+    assert w.doc.frame_idx == 2 and w.frame_bar.index == 2 and w.mol is w.frames[2]
+    assert cm_signature(w.frames[2]) == edited and "(frame 3/12)" in w.windowTitle()
+    assert {k: cm_signature(w.frames[k]) for k in others} == others
+    assert history(w) == (True, False)
+    w.set_frame(0)
+    assert history(w) == (True, False)
+    w.undo()
+    assert w.doc.frame_idx == 2 and {a.element.symbol for a in w.mol.atoms} == {"O", "H"}
+    assert cm_signature(w.frames[0]) == others[0]
+
+
 # ---- geometry tables --------------------------------------------------------------------
 
 
@@ -453,7 +616,150 @@ def test_measure_and_shift_click(hkust, qtbot):
     front = int(np.argmax(v._depth))
     x, y = (int(c) for c in v._screen[front])
     qtbot.mouseClick(v, QtCore.Qt.LeftButton, QtCore.Qt.ShiftModifier, QtCore.QPoint(x, y))
-    assert w.statusBar().currentMessage().startswith(("Distance", "Angle", "Atom"))
+    assert w.statusBar().currentMessage().startswith(("Distance", "Angle", "Dihedral", "Atom"))
+
+
+def same_view(a, b) -> bool:
+    (rot_a, zoom_a, pan_a, centre_a), (rot_b, zoom_b, pan_b, centre_b) = a, b
+    return (np.array_equal(rot_a, rot_b) and zoom_a == zoom_b and pan_a == pan_b
+            and np.array_equal(centre_a, centre_b))
+
+
+def double_click(qtbot, widget, pos, modifier=QtCore.Qt.NoModifier):
+    """What Qt delivers for a double click: press, release, double click, release
+    (qtbot.mouseDClick alone sends only the double-click event)."""
+    left = QtCore.Qt.LeftButton
+    qtbot.mousePress(widget, left, modifier, pos)
+    qtbot.mouseRelease(widget, left, modifier, pos)
+    qtbot.mouseDClick(widget, left, modifier, pos)
+    qtbot.mouseRelease(widget, left, modifier, pos)
+
+
+def test_double_click_is_a_click_and_keeps_the_view(hkust, qtbot):
+    w, v = hkust, hkust.view
+    v.rotate(0.6, -0.3)
+    v.zoom(0.6)
+    v._pan = QtCore.QPointF(25, -15)
+    pixels(v)  # project the atoms where they are now drawn
+    state = v.view_state()
+    front = int(np.argmax(np.where(v._visible, v._depth, -np.inf)))
+    on_atom = QtCore.QPoint(*(int(round(c)) for c in v._screen[front]))
+    assert v.atom_at(on_atom.x(), on_atom.y()) == front and v.atom_at(3, 3) is None
+
+    double_click(qtbot, v, on_atom)
+    assert same_view(state, v.view_state())
+    assert v.selected == front and v._drag_pos is None
+    assert w.selection_label.text().startswith(f"#{front + 1} ")
+    double_click(qtbot, v, QtCore.QPoint(3, 3))  # on the background: deselects
+    assert same_view(state, v.view_state()) and v.selected is None and v._drag_pos is None
+
+    double_click(qtbot, v, on_atom, QtCore.Qt.ShiftModifier)  # picks the atom once
+    assert v.picked == [front] and same_view(state, v.view_state())
+    assert w.statusBar().currentMessage().startswith(f"Atom {front + 1}:")
+    w.view_checks["measure_mode"].setChecked(True)
+    double_click(qtbot, v, on_atom)  # no zero-length distance pinned
+    assert v.picked == [front] and v.measurements == []
+    w.view_checks["measure_mode"].setChecked(False)
+
+    # holding the second press and dragging rotates, as after any press
+    left = QtCore.Qt.LeftButton
+    qtbot.mousePress(v, left, pos=on_atom)
+    qtbot.mouseRelease(v, left, pos=on_atom)
+    qtbot.mouseDClick(v, left, pos=on_atom)
+    assert v._drag_pos is not None
+    qtbot.mouseMove(v, on_atom + QtCore.QPoint(40, 25))
+    qtbot.mouseRelease(v, left, pos=on_atom + QtCore.QPoint(40, 25))
+    assert not np.allclose(v._rot, state[0]) and v._drag_pos is None
+    w.actions_by_name["Reset view"].trigger()  # resetting is still one key or click away
+    assert not same_view(state, v.view_state())
+
+
+def dihedral_chain(phi, start=(0.0, 0.0, 0.0)):
+    """Atoms i-j-k-m with 1.5 Å bonds and 110° angles; signed dihedral ``phi`` degrees."""
+    s, c = 1.5 * np.sin(np.radians(70)), 1.5 * np.cos(np.radians(70))
+    p = np.radians(phi)
+    pts = np.array([[-c, s, 0.0], [0.0, 0.0, 0.0], [1.5, 0.0, 0.0],
+                    [1.5 + c, s * np.cos(p), s * np.sin(p)]])
+    return pts + np.asarray(start)
+
+
+def chain_tab(window, pts, pbc=None):
+    window.new_tab(Molecule(atoms=[Atom(*p, "C") for p in pts], pbc=pbc), name="chain")
+    return window.view
+
+
+@pytest.mark.parametrize("phi", [0, 60, 90, 135, 180, -60, -135])
+def test_shift_click_four_atoms_gives_an_unsigned_dihedral(window, phi):
+    v = chain_tab(window, dihedral_chain(phi))
+    # (get_dihedrals' 1e-10 guard against zero normals moves 0 and 180 by ~1e-3 degrees)
+    assert v.dihedral(0, 1, 2, 3) == pytest.approx(abs(phi), abs=0.005)
+    assert v.dihedral(3, 2, 1, 0) == pytest.approx(abs(phi), abs=0.005)
+    for i in range(3):
+        v.pick(i, shift=True)
+    assert v.pick(3, shift=True) == f"Dihedral 1-2-3-4 = {abs(phi):.2f}°"
+    assert v.picked == [0, 1, 2, 3]
+
+
+def test_fifth_shift_click_slides_and_all_four_are_marked(window):
+    pts = dihedral_chain(60)
+    v = chain_tab(window, np.vstack([pts, pts[3] + [1.5, 0.0, 0.0]]))
+    for i in range(3):
+        v.pick(i, shift=True)
+    three = pixels(v)
+    assert v.pick(3, shift=True).startswith("Dihedral 1-2-3-4 = 60.00°")
+    four = pixels(v)
+    assert differs(three, four)  # the fourth atom gets its ring too
+    msg = v.pick(4, shift=True)
+    assert v.picked == [1, 2, 3, 4]
+    assert msg == f"Dihedral 2-3-4-5 = {v.dihedral(1, 2, 3, 4):.2f}°"
+    assert differs(four, pixels(v))  # the first atom's ring goes, the fifth's comes
+    v.pick(2, shift=True)  # an atom already picked is not added twice
+    assert v.picked == [1, 2, 3, 4]
+    window.set_molecule(window.mol)  # a new structure clears the picks
+    assert v.picked == []
+
+
+@pytest.mark.parametrize("cell", [(10, 10, 10, 90, 90, 90), (10, 11, 12, 80, 95, 110)])
+def test_dihedral_uses_the_minimum_image(window, cell):
+    pbc = PBC(*cell)
+    pts = dihedral_chain(50, start=(-0.3, -0.2, 0.1))  # three of the atoms outside the cell
+    frac = pts @ pbc.reciprocal_basis_matrix
+    pts = (frac - np.floor(frac)) @ pbc.basis_matrix  # wrapped in: bonds cross the faces
+    v = chain_tab(window, pts, pbc)
+    assert v.dihedral(0, 1, 2, 3) == pytest.approx(50.0, abs=1e-6)
+    assert v.pick(0, shift=True) and v.pick(1, shift=True) and v.pick(2, shift=True)
+    assert v.pick(3, shift=True) == "Dihedral 1-2-3-4 = 50.00°"
+    window.mol.bonds = [(0, 1), (1, 2), (2, 3)]
+    assert window.mol.get_dihedrals() == [(0, 1, 2, 3, v.dihedral(0, 1, 2, 3))]
+    window.mol.pbc = None
+    assert abs(v.dihedral(0, 1, 2, 3) - 50.0) > 5  # without the cell it would be wrong
+
+
+def test_dihedral_matches_the_geometry_panel(hkust):
+    """The same number as Molecule.get_dihedrals and the Geometry panel's Dihedrals tab."""
+    w, v = hkust, hkust.view
+    mol = w.mol
+    cell = mol.pbc
+    for a in mol.atoms:  # shift and wrap each atom on its own: linkers straddle the faces
+        frac = a.x @ cell.reciprocal_basis_matrix + 0.1
+        a.x = (frac - np.floor(frac)) @ cell.basis_matrix
+    mol.detect_bonds()
+    _, rows = geometry_rows(mol, "Dihedrals")
+    shown = {idx: cells[4] for cells, idx in rows}
+    pos = np.array([a.x for a in mol.atoms])
+    half = min(mol.pbc.a, mol.pbc.b, mol.pbc.c) / 2
+    data = mol.get_dihedrals()
+    across = 0
+    for i, j, k, m, angle in data:
+        assert v.dihedral(i, j, k, m) == angle
+        assert v.dihedral(m, k, j, i) == pytest.approx(angle, abs=1e-9)
+        assert f"{v.dihedral(i, j, k, m):.3f}" == shown[(i, j, k, m)]
+        across += any(np.abs(pos[b] - pos[a]).max() > half for a, b in ((i, j), (j, k), (k, m)))
+    assert len(data) > 100 and across > 0  # some of them span the periodic boundary
+    i, j, k, m, angle = data[0]
+    for idx in (i, j, k):
+        v.pick(idx, shift=True)
+    assert v.pick(m, shift=True) == f"Dihedral {i + 1}-{j + 1}-{k + 1}-{m + 1} = {angle:.2f}°"
 
 
 def test_view_keys_match_the_terminal_viewer(hkust, qtbot):
@@ -839,6 +1145,11 @@ def test_controls_help_matches_the_view(hkust, qtbot):
     assert dlg.shortcut().toString() == "F1"
     report = hkust.show_controls()
     assert report.text.toPlainText().strip() == CONTROLS_HELP.strip()
+    assert "Double click" not in CONTROLS_HELP  # it is an ordinary click now
+    assert "3 an angle, 4 a dihedral" in CONTROLS_HELP
+    assert f"{hkust.undo_action.shortcut().toString()} undo" in CONTROLS_HELP
+    redo_keys = " or ".join(s.toString() for s in hkust.redo_action.shortcuts())
+    assert f"\n  Ctrl+Z undo    {redo_keys} redo\n" in CONTROLS_HELP
     v = hkust.view
     for key, attr in (("b", "show_bonds"), ("#", "show_atom_numbers"), ("w", "hide_water"),
                       ("P", "show_polyhedra"), ("O", "orthographic"), ("t", "pan_mode"),

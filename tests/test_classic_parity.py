@@ -355,15 +355,30 @@ def test_edit_menu_rejects_bad_input():
 
 def test_measure_distance_angle_dihedral():
     atoms = [Atom(0, 0, 0, "C"), Atom(1.5, 0, 0, "C"), Atom(1.5, 1.5, 0, "C"),
-             Atom(1.5, 1.5, 1.5, "C")]
+             Atom(1.5, 1.5, 1.5, "C"), Atom(1.5, 1.5, -1.5, "C")]
     mol = Molecule(atoms=atoms, pbc=PBC(30, 30, 30, 90, 90, 90))
     assert "r = 1.5000 A" in mt.cm_measure(mol, [1, 2])
     assert "angle = 90.00 deg" in mt.cm_measure(mol, [1, 2, 3])
-    assert "dihedral = -90.00 deg" in mt.cm_measure(mol, [1, 2, 3, 4]) \
-        or "dihedral = 90.00 deg" in mt.cm_measure(mol, [1, 2, 3, 4])
+    # unsigned (0-180) like the dihedrals list and the GUI: mirror images read the same
+    assert mt.cm_measure(mol, [1, 2, 3, 4]) == "C1-C2-C3-C4   dihedral = 90.00 deg"
+    assert mt.cm_measure(mol, [1, 2, 3, 5]) == "C1-C2-C3-C5   dihedral = 90.00 deg"
     for bad in ([1], [1, 1], [1, 9]):
         with pytest.raises(ValueError):
             mt.cm_measure(mol, bad)
+
+
+@pytest.mark.parametrize("phi", [60.0, -60.0, 150.0, -150.0])
+def test_measured_dihedral_matches_the_dihedrals_list_across_the_cell(phi):
+    s, c, p = 1.5 * np.sin(np.radians(70)), 1.5 * np.cos(np.radians(70)), np.radians(phi)
+    pts = np.array([[-c, s, 0.0], [0.0, 0.0, 0.0], [1.5, 0.0, 0.0],
+                    [1.5 + c, s * np.cos(p), s * np.sin(p)]])  # signed dihedral phi
+    pts = (pts + [-0.3, -0.2, 0.1]) % 10.0  # into a 10 A cell: bonds cross its faces
+    mol = Molecule(atoms=[Atom(*x, "C") for x in pts], pbc=PBC(10, 10, 10, 90, 90, 90))
+    mol.detect_bonds()
+    [(i, j, k, m, angle)] = mol.get_dihedrals()
+    assert angle == pytest.approx(abs(phi))
+    for ids in ([i + 1, j + 1, k + 1, m + 1], [m + 1, k + 1, j + 1, i + 1], [1, 2, 3, 4]):
+        assert mt.cm_measure(mol, ids).endswith(f"dihedral = {angle:.2f} deg"), ids
 
 
 def test_measure_uses_the_minimum_image():

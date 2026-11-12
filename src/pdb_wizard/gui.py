@@ -139,8 +139,7 @@ Mouse (in the 3D view)
   Right or middle drag pan (left drag also pans in pan mode)
   Wheel                zoom
   Click an atom        select it (shown in the Structure panel and the Atoms table)
-  Shift+click atoms    2 atoms give a distance, 3 an angle (in the status bar)
-  Double click         reset the view
+  Shift+click atoms    2 atoms give a distance, 3 an angle, 4 a dihedral (in the status bar)
 
 Keys (click the 3D view first)
   Arrows or h j k l    rotate (pan in pan mode)
@@ -165,7 +164,8 @@ Trajectories
   Space                play / pause
 
 Window
-  Ctrl+O open    Ctrl+S save as    Ctrl+Z undo    Ctrl+W close tab
+  Ctrl+O open    Ctrl+S save as    Ctrl+W close tab
+  Ctrl+Z undo    Ctrl+Shift+Z or Ctrl+Y redo
   Ctrl+D database    Ctrl+I input generator    Ctrl+E export image
   Ctrl+G geometry panel    F1 this help
 """
@@ -233,9 +233,10 @@ def _ca_chains(mol: Molecule) -> List[List[int]]:
 class StructureView(_QWidget):
     """3D structure view drawn with QPainter.
 
-    Left drag rotates (pans in pan mode), right or middle drag pans, the wheel zooms, a
-    double click resets the view and a click selects the atom under the cursor. In measure
-    mode two clicks pin a distance; shift-click up to three atoms for a distance or angle.
+    Left drag rotates (pans in pan mode), right or middle drag pans, the wheel zooms and a
+    click selects the atom under the cursor (a double click is just two clicks; r resets
+    the view). In measure mode two clicks pin a distance; shift-click up to four atoms for a
+    distance, angle or dihedral.
     The terminal viewer's keys work when the view has focus (b, v, i, #, C, w, m, P, O, t,
     c, r, arrows, +/-, ',' and '.').
     """
@@ -730,6 +731,15 @@ class StructureView(_QWidget):
         cos_a = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
         return float(np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0))))
 
+    def dihedral(self, i: int, j: int, k: int, m: int) -> float:
+        """Dihedral i-j-k-m in degrees, unsigned (0-180), minimum image when there is a
+        cell: the formula of Molecule.get_dihedrals, so it matches the Geometry panel."""
+        b1, b2, b3 = self._vec(j, i), self._vec(k, j), self._vec(m, k)
+        n1 = np.cross(b1, b2)
+        n2 = np.cross(b2, b3)
+        cos_d = np.dot(n1, n2) / ((np.linalg.norm(n1) + 1e-10) * (np.linalg.norm(n2) + 1e-10))
+        return float(np.degrees(np.arccos(np.clip(cos_d, -1.0, 1.0))))
+
     def clear_marks(self) -> None:
         """Forget selection, picks, highlights and pinned measurements (after an edit the
         indices may point at other atoms, or past the end)."""
@@ -760,14 +770,17 @@ class StructureView(_QWidget):
         else:
             if idx not in self.picked:
                 self.picked.append(idx)
-            del self.picked[:-3]
+            del self.picked[:-4]  # a fifth atom drops the first
             p = self.picked
+            numbers = "-".join(str(i + 1) for i in p)
             if len(p) == 1:
                 msg = f"Atom {p[0] + 1}: {a.element.symbol} ({a.name})"
             elif len(p) == 2:
-                msg = f"Distance {p[0] + 1}-{p[1] + 1} = {self.distance(*p):.4f} Å"
+                msg = f"Distance {numbers} = {self.distance(*p):.4f} Å"
+            elif len(p) == 3:
+                msg = f"Angle {numbers} = {self.angle(*p):.2f}°"
             else:
-                msg = f"Angle {p[0] + 1}-{p[1] + 1}-{p[2] + 1} = {self.angle(*p):.2f}°"
+                msg = f"Dihedral {numbers} = {self.dihedral(*p):.2f}°"
         self.update()
         return msg
 
@@ -812,7 +825,9 @@ class StructureView(_QWidget):
         self._drag_pos = None
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        self.reset_view()
+        # Qt sends press, release, double click, release: treat the double click as the
+        # second press, so it selects or picks like any click and never moves the camera
+        self.mousePressEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         self.zoom(1.12 if event.angleDelta().y() > 0 else 1 / 1.12)
@@ -976,7 +991,8 @@ class GuiDocument:
         self.path = path
         self.frames = frames
         self.frame_idx = 0
-        self.undo: list = []
+        self.undo: list = []  # (frame index, Molecule), newest last
+        self.redo: list = []  # states undo replaced, same layout; a new edit clears it
         self.name = name or (Path(path).name if path else "untitled")
         self.view_state: Optional[tuple] = None
         self.density: Optional[tuple] = None
@@ -1004,11 +1020,13 @@ class MainWindow(_QMainWindow):
     path = _doc_attr("path")
     frames = _doc_attr("frames")
     _undo = _doc_attr("undo")
+    _redo = _doc_attr("redo")
 
     def __init__(self, path: Optional[str] = None) -> None:
         super().__init__()
         self.docs: List[GuiDocument] = [GuiDocument()]
         self.doc_index = 0
+        self._redo_stash: Optional[tuple] = None  # (document, redo list) during an edit
         self.dialogs: list = []  # keeps open tool windows alive
         self.load_task: Optional[GuiTask] = None
         self.task: Optional[GuiTask] = None
@@ -1306,7 +1324,12 @@ class MainWindow(_QMainWindow):
         action(f, "&Quit", self.close, "Ctrl+Q")
 
         self.undo_action = action(e, "&Undo", self.undo, "Ctrl+Z", sp.SP_ArrowBack, True)
+        # "Re&do": R is taken in this menu by Reduce supercell
+        self.redo_action = action(e, "Re&do", self.redo, None, sp.SP_ArrowForward, True)
+        self.redo_action.setShortcuts([QtGui.QKeySequence("Ctrl+Shift+Z"),
+                                       QtGui.QKeySequence("Ctrl+Y")])
         self.undo_action.setEnabled(False)
+        self.redo_action.setEnabled(False)
         menus[e].addSeparator()
         action(e, "&Build supercell…", self._show_supercell_tab)
         action(e, "&Reduce supercell…", lambda: self.reduce_supercell())
@@ -1415,7 +1438,7 @@ class MainWindow(_QMainWindow):
         self.density_action.setEnabled(d.density is not None)
         self.frame_bar.set_count(len(d.frames) if d.frames else 1, d.frame_idx)
         self._refresh_panels()
-        self.undo_action.setEnabled(bool(d.undo))
+        self._update_history_actions()
 
     def new_tab(self, mol: Optional[Molecule], path: Optional[str] = None,
                 name: str = "", frames: Optional[list] = None) -> GuiDocument:
@@ -1439,7 +1462,7 @@ class MainWindow(_QMainWindow):
         self.density_action.setEnabled(False)
         self.frame_bar.set_count(len(d.frames) if d.frames else 1, d.frame_idx)
         self._refresh_panels()
-        self.undo_action.setEnabled(bool(d.undo))
+        self._update_history_actions()
 
     def close_tab(self, index: int) -> None:
         if not 0 <= index < len(self.docs):
@@ -1492,29 +1515,54 @@ class MainWindow(_QMainWindow):
         self._refresh_panels()
         self.statusBar().showMessage(message, 8000)
 
+    def _update_history_actions(self) -> None:
+        """Undo and Redo follow the shown tab's history."""
+        self.undo_action.setEnabled(bool(self._undo))
+        self.redo_action.setEnabled(bool(self._redo))
+
     def _checkpoint(self) -> None:
         # remember which frame was edited: undo must restore that frame, not the shown one
         self._undo.append((self.doc.frame_idx, copy.deepcopy(self.mol)))
         del self._undo[:-20]
-        self.undo_action.setEnabled(True)
+        # a new edit ends the redo history; it is kept aside until the edit is known to
+        # change something, since an edit that finds nothing to do calls _discard_checkpoint
+        self._redo_stash = (self.doc, self._redo)
+        self._redo = []
+        self._update_history_actions()
 
     def _discard_checkpoint(self) -> None:
         if self._undo:
             self._undo.pop()
-        self.undo_action.setEnabled(bool(self._undo))
+        stash, self._redo_stash = self._redo_stash, None
+        if stash is not None and stash[0] is self.doc:
+            self._redo = stash[1]
+        self._update_history_actions()
 
-    def undo(self) -> None:
-        if not self._undo:
-            return
-        frame, mol = self._undo.pop()
+    def _step_history(self, source: list, target: list, message: str) -> None:
+        """Undo (from the undo list onto the redo list) or redo (the other way round):
+        show the saved state on the frame it was taken from, and keep the state it replaces
+        in ``target`` so the step can be taken back."""
+        frame, mol = source.pop()
         if self.frames and frame < len(self.frames):
             self.frame_bar.stop(notify=False)
             self.doc.frame_idx = frame
             self.frame_bar.set_count(len(self.frames), frame)
+        frame = self.doc.frame_idx
+        target.append((frame, self.frames[frame] if self.frames else self.mol))
+        del target[:-20]
+        self._redo_stash = None
         self.set_molecule(mol, reset_view=False)
         self.view.clear_marks()
-        self.undo_action.setEnabled(bool(self._undo))
-        self.statusBar().showMessage("Undone", 4000)
+        self._update_history_actions()
+        self.statusBar().showMessage(message, 4000)
+
+    def undo(self) -> None:
+        if self._undo:
+            self._step_history(self._undo, self._redo, "Undone")
+
+    def redo(self) -> None:
+        if self._redo:
+            self._step_history(self._redo, self._undo, "Redone")
 
     def _need_structure(self, what: str, cell: bool = False) -> bool:
         if self.mol is None or not self.mol.atoms:

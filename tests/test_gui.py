@@ -442,7 +442,10 @@ def test_hover_updates_status_and_pan(hkust, qtbot):
     qtbot.mouseMove(v, QtCore.QPoint(130, 120))
     qtbot.mouseRelease(v, QtCore.Qt.RightButton, pos=QtCore.QPoint(130, 120))
     assert v._pan != pan
+    panned = QtCore.QPointF(v._pan)
     qtbot.mouseDClick(v, QtCore.Qt.LeftButton, pos=QtCore.QPoint(5, 5))
+    assert v._pan == panned  # a double click is a click: the view stays where it is
+    qtbot.keyClicks(v, "r")
     assert v._pan == QtCore.QPointF(0, 0)
 
 

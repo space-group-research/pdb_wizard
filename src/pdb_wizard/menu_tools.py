@@ -656,10 +656,11 @@ def cm_measure(mol: Molecule, ids: List[int]) -> str:
         v1, v2 = vec(atoms[1], atoms[0]), vec(atoms[1], atoms[2])
         cos = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
         return f"{label}   angle = {np.degrees(np.arccos(np.clip(cos, -1, 1))):.2f} deg"
+    # unsigned (0-180), as Molecule.get_dihedrals: the dihedrals list and the GUI agree
     b1, b2, b3 = (vec(atoms[0], atoms[1]), vec(atoms[1], atoms[2]), vec(atoms[2], atoms[3]))
     n1, n2 = np.cross(b1, b2), np.cross(b2, b3)
-    m1 = np.cross(n1, b2 / (np.linalg.norm(b2) + 1e-10))
-    angle = np.degrees(np.arctan2(np.dot(m1, n2), np.dot(n1, n2)))
+    cos_d = np.dot(n1, n2) / ((np.linalg.norm(n1) + 1e-10) * (np.linalg.norm(n2) + 1e-10))
+    angle = np.degrees(np.arccos(np.clip(cos_d, -1.0, 1.0)))
     return f"{label}   dihedral = {angle:.2f} deg"
 
 
