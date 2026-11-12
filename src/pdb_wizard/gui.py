@@ -27,6 +27,7 @@ import numpy as np
 
 from pdb_wizard.analyses import (
     charge_report,
+    check_text,
     elements_of,
     find_energy_file,
     run_density_3d,
@@ -37,6 +38,7 @@ from pdb_wizard.analyses import (
 )
 from pdb_wizard.atom import Atom
 from pdb_wizard.charges import apply_qeq_charges
+from pdb_wizard.checks import load_notes, lone_atom_summary, lone_atom_warning
 from pdb_wizard.constants import get_element
 from pdb_wizard.energy import read_energy_dat
 from pdb_wizard.forcefields import (
@@ -1339,7 +1341,7 @@ class MainWindow(_QMainWindow):
         menus[e].addSeparator()
         action(e, "&Sort atoms", self.sort_atoms)
         action(e, "Substitute ele&ment…", lambda: self.substitute_element())
-        action(e, "Delete &lone atoms", self.delete_lone_atoms)
+        action(e, "Delete &lone atoms", lambda: self.delete_lone_atoms(ask=True))
         action(e, "Edit &H distances…", lambda: self.edit_h_distances())
         bar.addSeparator()
 
@@ -1384,7 +1386,8 @@ class MainWindow(_QMainWindow):
         menus[t].addSeparator()
         action(t, "&Input generator…", lambda: self.open_tool("input_generator"), "Ctrl+I")
 
-        for key, label in (("info", "System &info"), ("void_vol", "&Void volume"),
+        for key, label in (("info", "System &info"), ("check", "Chec&k structure"),
+                           ("void_vol", "&Void volume"),
                            ("surface_area", "&Surface area"),
                            ("pore_size", "&Pore size distribution"), (None, None),
                            ("rdf", "&Radial distribution"),
@@ -1786,7 +1789,15 @@ class MainWindow(_QMainWindow):
                 f"{OVERLAP_CUTOFF} Å)" if n else "")
         self.statusBar().showMessage(f"Opened {Path(path).name}: {len(mol.atoms)} atoms{note}",
                                      8000)
+        self._warn_load_notes(mol, Path(path).name)
         return True
+
+    def _warn_load_notes(self, mol: Molecule, name: str) -> None:
+        """Say what the file reader could not honour (e.g. a CIF read as its asymmetric
+        unit). Analysis > Check structure repeats it."""
+        notes = load_notes(mol)
+        if notes:
+            self._warn(f"{name}:\n\n" + "\n\n".join(notes))
 
     def _open_trajectory(self, path: str) -> bool:
         d = self.new_tab(Molecule(atoms=[]), path, name=f"{Path(path).name} (loading)")
@@ -1997,9 +2008,24 @@ class MainWindow(_QMainWindow):
         sort_system(self.mol, False)
         self._changed("Sorted atoms")
 
-    def delete_lone_atoms(self) -> int:
+    def _confirm(self, title: str, text: str) -> bool:
+        box = QtWidgets.QMessageBox
+        return box.question(self, title, text, box.Yes | box.No, box.No) == box.Yes
+
+    def delete_lone_atoms(self, ask: bool = False) -> int:
+        """Delete atoms with no close neighbour. ``ask`` (the menu) shows what would go
+        first, with a caution when that includes framework metals."""
         if not self._need_structure("Finding lone atoms", cell=True):
             return 0
+        if ask:
+            found = lone_atom_summary(self.mol)
+            if not found:
+                self.statusBar().showMessage("No lone atoms found", 5000)
+                return 0
+            caution = lone_atom_warning(self.mol)
+            if not self._confirm("Delete lone atoms", f"This would delete: {found}."
+                                 + (f"\n\n{caution}" if caution else "") + "\n\nDelete them?"):
+                return 0
         self._checkpoint()
         _, deleted = remove_lone_atoms(self.mol)
         if not deleted:
@@ -2221,6 +2247,8 @@ class MainWindow(_QMainWindow):
         mol, frames, doc = self.mol, self.frames, self.doc
         if key == "info":
             return self.report("System Info", system_info_text(mol, self.path or ""))
+        if key == "check":
+            return self.report("Check Structure", check_text(mol, frames))
         if key in ("void_vol", "surface_area"):
             mol = self._snapshot()
         if key == "void_vol":
@@ -2256,6 +2284,7 @@ class MainWindow(_QMainWindow):
             return
         self.new_tab(mol, path)
         self.statusBar().showMessage(f"Opened {label} {rid} ({len(mol.atoms)} atoms)", 6000)
+        self._warn_load_notes(mol, f"{label} {rid}")
 
     def energy_plot(self, path: Optional[str] = None):
         """MPMC energy.dat next to the structure, or one you pick."""

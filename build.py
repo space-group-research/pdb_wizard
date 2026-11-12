@@ -24,6 +24,7 @@ MODULE_ORDER = [
     "dcd",
     "trajectory",
     "geometry",
+    "checks",
     "operations",
     "renderer",
     "charges",

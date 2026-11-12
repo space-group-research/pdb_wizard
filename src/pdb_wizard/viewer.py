@@ -1546,6 +1546,8 @@ class MsdScreen(_AnalysisScreen):
         plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0,
                       y_max=res.y_max)
         status.update(res.summary)
+        if res.text:  # Monte Carlo trajectory: the curve is not diffusion
+            self.app.notify(res.text, severity="warning", timeout=15)
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "lag_frames,msd_A2", self._last_lags, self._last_msd)
@@ -1699,6 +1701,8 @@ class RmsdScreen(_AnalysisScreen):
         plot.set_data(res.x, res.y, title=res.title, x_label=res.x_label, y_min=0.0,
                       y_max=res.y_max)
         status.update(res.summary)
+        if res.text:  # Monte Carlo trajectory: the curve has no time axis
+            self.app.notify(res.text, severity="warning", timeout=15)
 
     def _export_csv(self, filepath: str) -> None:
         self._do_export_csv(filepath, "frame,rmsd_A", self._last_idx, self._last_rmsd)
@@ -2469,6 +2473,7 @@ class DatabaseSearchScreen(ModalScreen[None]):
                 f"Opened {label} {rid} ({len(mol.atoms)} atoms)", timeout=3,
             )
             self.app.notify_overlaps_removed(load_msgs)
+            self.app.notify_load_notes(mol)
             self.dismiss(None)  # auto-close on success
         except Exception as e:
             status.update(f"Error: {e}")
@@ -3523,6 +3528,7 @@ MENU_VIEW = [
 
 MENU_ANALYSIS = [
     ("info", "System Info"),
+    ("check", "Check Structure"),
     ("void_vol", "Void Volume"),
     ("surface_area", "Surface Area"),
     ("pore_size", "Pore Size Distribution"),
@@ -3704,6 +3710,13 @@ class PdbWizardApp(App):
         # Per-session cache for downloaded structures. Created lazily on first
         # fetch; removed on app teardown.
         self._db_cache_dir_path: str | None = None
+
+    def notify_load_notes(self, mol) -> None:
+        """Warn about anything the file reader could not honour (e.g. a CIF read as its
+        asymmetric unit); Check Structure repeats it."""
+        from pdb_wizard.checks import load_notes
+        for note in load_notes(mol):
+            self.notify(note, timeout=20, severity="warning")
 
     def notify_overlaps_removed(self, messages: list[str]) -> None:
         """Toast a summary of atoms deleted by read_file's overlap check.
@@ -3963,6 +3976,7 @@ class PdbWizardApp(App):
                 self.open_in_new_tab(mol, filepath)
                 self.notify(f"Opened {self._tabs[-1].name}", timeout=2)
                 self.notify_overlaps_removed(load_msgs)
+                self.notify_load_notes(mol)
         except Exception as e:
             self.notify(f"Error: {e}", timeout=3)
 
@@ -4099,6 +4113,7 @@ class PdbWizardApp(App):
         if self._startup_load_messages:
             self.notify_overlaps_removed(self._startup_load_messages)
             self._startup_load_messages = []
+        self.notify_load_notes(self.molecule)
 
     async def _load_trajectory_async(self) -> None:
         self._show_progress("Loading trajectory...", total=100)
@@ -5163,6 +5178,11 @@ class PdbWizardApp(App):
             self.push_screen(InfoModal("System Info", system_info_text(mol, self.filepath)))
             return
 
+        elif cmd == "check":
+            from pdb_wizard.analyses import check_text
+            self.push_screen(InfoModal("Check Structure", check_text(mol, self._frames)))
+            return
+
         elif cmd == "rdf":
             if len(mol.atoms) == 0:
                 self.notify("No atoms loaded yet", timeout=2)
@@ -5340,11 +5360,16 @@ class PdbWizardApp(App):
         elif cmd == "del_lone":
             if not self._require_cell("Finding lone atoms"):
                 return
+            from pdb_wizard.checks import lone_atom_summary, lone_atom_warning
+            found = lone_atom_summary(mol)
+            caution = lone_atom_warning(mol)
             self.push_screen(
                 ConfirmModal(
                     "Delete Lone Atoms",
                     "Remove all atoms that have no neighbors within\n"
-                    "VDW contact distance. This cannot be undone.",
+                    "VDW contact distance. This cannot be undone.\n\n"
+                    + (f"Would delete: {found}" if found else "No lone atoms found.")
+                    + (f"\n\n⚠ {caution}" if caution else ""),
                 ),
                 callback=self._do_del_lone,
             )
@@ -5657,6 +5682,7 @@ class PdbWizardApp(App):
                 self._refresh_tab_bar()
                 self.notify(f"Opened {Path(filepath).name}", timeout=2)
                 self.notify_overlaps_removed(load_msgs)
+                self.notify_load_notes(mol)
             except Exception as e:
                 self.notify(f"Error opening file: {e}", timeout=4, severity="error")
             return
@@ -5927,17 +5953,20 @@ class PdbWizardApp(App):
             DEFAULT_CSS = _ANALYSIS_CSS.format(cls="IsothermPlotScreen") + """
             IsothermPlotScreen #iso-status { height: 1; color: $text-muted; }
             """
-            def __init__(self, p, u, path):
+            def __init__(self, p, u, path, log_text=""):
                 ModalScreen.__init__(self)
                 self._molecule = None
                 self._frames = None
                 self._elements = []
                 self._compute_task = None
                 self._p, self._u, self._path = p, u, path
+                self._log_text = log_text  # MPMC's own averages and unfinished runs
             def compose(self_inner) -> ComposeResult:
                 with Vertical():
                     with Horizontal():
                         yield Button("CSV", id="iso-csv")
+                        if self_inner._log_text:
+                            yield Button("MPMC averages", id="iso-log")
                         yield Button("Close", id="iso-close")
                     yield PlotWidget(id="iso-plot")
                     yield Label("", id="iso-status")
@@ -5954,6 +5983,9 @@ class PdbWizardApp(App):
             def on_button_pressed(self_inner, event: Button.Pressed) -> None:
                 if event.button.id == "iso-close":
                     self_inner.dismiss(None)
+                elif event.button.id == "iso-log":
+                    self_inner.app.push_screen(
+                        InfoModal("MPMC averages", self_inner._log_text))
                 elif event.button.id == "iso-csv":
                     self_inner.app.push_screen(
                         FileSaveModal("Save isotherm CSV:", default="isotherm.csv"),
@@ -5961,7 +5993,10 @@ class PdbWizardApp(App):
                             fp, "pressure_atm,avg_molecules", self_inner._p, self_inner._u),
                     )
 
-        self.push_screen(IsothermPlotScreen(pressures, uptakes, dirpath))
+        self.push_screen(IsothermPlotScreen(pressures, uptakes, dirpath, res.text))
+        if "has not finished" in res.text:
+            self.notify("Some pressure points have not finished; see MPMC averages.",
+                        severity="warning", timeout=8)
 
     def _show_energy_plot(self) -> None:
         from pathlib import Path

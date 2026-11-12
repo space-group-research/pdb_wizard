@@ -687,15 +687,21 @@ def _frac_to_cart(frac_coords: np.ndarray, basis_matrix: np.ndarray) -> np.ndarr
     return frac_coords @ basis_matrix
 
 
-def read_cif(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC]]:
+def read_cif(file: TextIO, filename: str = "",
+             notes: Optional[list] = None) -> tuple[list[Atom], Optional[PBC]]:
     """Read a CIF file, returning atoms (in Cartesian) and PBC.
 
     Handles:
     - P1 CIF files with fractional coordinates (most common for MOFs)
     - CIF files with symmetry operations that need expansion
     - Both _atom_site_fract_x and _atom_site_Cartn_x
+
+    ``notes`` (a list) receives a sentence for each thing the reader could not honour: a
+    space group named without its symmetry operators (the atoms are then only the
+    asymmetric unit) and partially occupied or disordered sites (all kept as full atoms).
     """
     lines = file.readlines()
+    _sg_number = ""
 
     # --- Phase 1: Parse all key-value pairs and loops ---
     cell_params: dict[str, float] = {}
@@ -821,7 +827,9 @@ def read_cif(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
                     pass
 
             if tag in ("_symmetry_space_group_name_h-m", "_space_group_name_h-m_alt"):
-                _space_group = value.strip()  # noqa: F841
+                _space_group = value.strip().strip("'\"")
+            if tag in ("_symmetry_int_tables_number", "_space_group_it_number"):
+                _sg_number = value.strip()
 
         i += 1
 
@@ -850,6 +858,17 @@ def read_cif(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
         parsed_symops = [_parse_symop_full("x,y,z")]
 
     is_p1 = len(parsed_symops) == 1
+    if notes is not None and is_p1:
+        name = _space_group.replace(" ", "").replace("_", "").upper()
+        named_higher = bool(name) and name not in ("P1", "?", ".")
+        numbered_higher = _sg_number.isdigit() and int(_sg_number) > 1
+        if named_higher or numbered_higher:
+            which = _space_group if named_higher else f"number {_sg_number}"
+            notes.append(
+                f"The CIF names space group {which} but lists no symmetry operators, so it "
+                f"was read as P1: the atoms are only the asymmetric unit, not the full cell. "
+                f"Re-export it with symmetry operators, or as P1 with all atoms (Mercury, "
+                f"VESTA), before using it.")
 
     # --- Phase 4: Extract atom data ---
     if not atom_loop_tags or not atom_loop_rows:
@@ -917,6 +936,32 @@ def read_cif(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
 
     if not labels:
         return [], pbc
+
+    if notes is not None:
+        partial = 0
+        groups = set()
+        for row in atom_loop_rows:
+            idx = col.get("_atom_site_occupancy")
+            if idx is not None and idx < len(row):
+                try:
+                    if _strip_cif_uncertainty(row[idx]) < 0.999:
+                        partial += 1
+                except ValueError:
+                    pass
+            idx = col.get("_atom_site_disorder_group")
+            if idx is not None and idx < len(row) and row[idx] not in (".", "?", "0", ""):
+                groups.add(row[idx])
+        if partial or groups:
+            what = []
+            if partial:
+                what.append(f"{partial} site{'s' if partial != 1 else ''} with occupancy "
+                            f"below 1")
+            if groups:
+                what.append(f"{len(groups)} disorder group{'s' if len(groups) != 1 else ''}")
+            notes.append(
+                f"The CIF has {' and '.join(what)}. Every site was kept as a full atom, so "
+                f"alternative positions overlap and the composition is wrong. Remove the "
+                f"extra sites before using it.")
 
     # --- Phase 5: Apply symmetry and convert to Cartesian ---
     system: list[Atom] = []
@@ -1517,6 +1562,7 @@ def read_file(
     deletion is never silent. Pass ``remove_overlaps=False`` to keep every atom.
     """
     ft = detect_filetype(filepath)
+    load_notes: list[str] = []  # what the reader had to assume; kept on the Molecule
     if ft == "pdb":
         with open(filepath) as f:
             system, pbc = read_pdb(f, filepath)
@@ -1527,7 +1573,7 @@ def read_file(
         system, pbc = read_zmat(filepath)
     elif ft == "cif":
         with open(filepath) as f:
-            system, pbc = read_cif(f, filepath)
+            system, pbc = read_cif(f, filepath, load_notes)
     elif ft == "poscar":
         from pdb_wizard.formats import read_poscar
         with open(filepath) as f:
@@ -1561,12 +1607,16 @@ def read_file(
         raise ValueError(f"Unknown filetype: {ft}")
 
     mol = Molecule(atoms=system, pbc=pbc)
+    if load_notes:
+        mol.load_notes = load_notes  # read by checks.load_notes and shown by the front ends
     if remove_overlaps:
         from pdb_wizard.geometry import remove_overlapping_atoms
         mol, messages = remove_overlapping_atoms(mol)
         report = on_message if on_message is not None else _log.warning
         for message in messages:
             report(message)
+    if load_notes:
+        mol.load_notes = load_notes
     mol.detect_bonds()
     return mol
 

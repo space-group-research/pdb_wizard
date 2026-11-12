@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 
+from pdb_wizard.checks import load_notes, lone_atom_warning
 from pdb_wizard.constants import get_element
 from pdb_wizard.forcefields import (
     apply_ff_to_system_report,
@@ -266,7 +267,10 @@ def _menu_geom_analysis(mol: Molecule) -> Molecule:
                 for atom in lone:
                     print(f"{atom.element.symbol:>3} {atom.id:>5} {atom.x}")
         elif option == 5:
+            caution = lone_atom_warning(mol)
             mol, deleted = remove_lone_atoms(mol)
+            if deleted and caution:
+                print(f"\n!!! Warning: {caution} (main menu 17 undoes this) !!!")
             if not deleted:
                 print("\nNo lone atoms found\n")
             else:
@@ -572,6 +576,7 @@ def _run_classic_file(filename: str) -> str | None:
 
     is_trajectory = False
     other_format = False
+    file_notes: list[str] = []
     if ext == "xyz":
         is_trajectory = check_xyz_trajectory(filename)
     elif ext in ("pdb", "ent", "pqr"):
@@ -600,6 +605,9 @@ def _run_classic_file(filename: str) -> str | None:
             loaded = read_file(filename, remove_overlaps=False)
         except (OSError, ValueError) as e:
             sys.exit(f"Could not read {filename}: {e}")
+        file_notes = load_notes(loaded)
+        for note in file_notes:
+            print(f"\n!!! Warning: {note} !!!\n")
         system, pbc = loaded.atoms, loaded.pbc
     else:
         with open(filename) as f:
@@ -624,5 +632,7 @@ def _run_classic_file(filename: str) -> str | None:
         pbc = PBC(a, b, c, alpha, beta, gamma)
 
     mol = Molecule(atoms=system, pbc=pbc)
+    if file_notes:
+        mol.load_notes = file_notes  # so Check Structure repeats them
     mol.detect_bonds()
     return _main_loop_single(mol, filename)

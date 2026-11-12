@@ -121,6 +121,10 @@ def _batch_msd(filepath: str, element: str | None, csv_path: str | None) -> None
     _warn_fallback_cell(frames)
 
     lags, msd = compute_msd(frames, element=element)
+    from pdb_wizard.checks import mc_trajectory_warning
+    caution = mc_trajectory_warning(frames, "a diffusion constant")
+    if caution:
+        print(caution, file=sys.stderr)
 
     if len(lags) == 0:
         print("No MSD data (check element or trajectory).", file=sys.stderr)

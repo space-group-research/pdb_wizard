@@ -8,6 +8,7 @@ template engine; this module supplies the per-pressure derived variables
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -354,7 +355,7 @@ def parse_isotherm_results(base_dir: str) -> list[tuple[float, float]]:
             continue
 
         hist_file = p_dir / "histogram.dat"
-        if hist_file.exists():
+        if hist_file.exists() and not _is_opendx(hist_file):
             try:
                 lines = hist_file.read_text().strip().split("\n")
                 total_n = 0.0
@@ -390,3 +391,97 @@ def parse_isotherm_results(base_dir: str) -> list[tuple[float, float]]:
 
     results.sort(key=lambda x: x[0])
     return results
+
+
+def _is_opendx(path: Path) -> bool:
+    """MPMC's histogram.dat is an OpenDX density grid, not an N histogram."""
+    try:
+        with open(path, errors="replace") as f:
+            head = f.read(400)
+    except OSError:
+        return False
+    return "OpenDX" in head or "gridpositions" in head
+
+
+_LOG_NAMES = ("mpmc.log", "runlog", "run.log", "output.log")
+_LOG_VALUE = re.compile(r"OUTPUT:\s*(N|wt %|wt % \(ME\)|qst)\s*=\s*([-+0-9.eE]+)"
+                        r"(?:\s*\+-\s*([-+0-9.eE]+))?")
+_LOG_STEP = re.compile(r"Completed step\s+(\d+)/(\d+)")
+
+
+def read_mpmc_log(p_dir: Path) -> dict:
+    """MPMC's own final averages from the run log in a pressure folder.
+
+    Looks for mpmc.log (what run_all.sh writes), a few common names, then any *.log or
+    slurm-*.out. Returns {} when there is no log, else a dict with ``file``, ``finished``,
+    ``step``/``steps`` and, when printed, ``N``, ``wt``, ``wt_me`` (value, error) and
+    ``qst``.
+    """
+    candidates = [p_dir / name for name in _LOG_NAMES]
+    candidates += sorted(p_dir.glob("*.log")) + sorted(p_dir.glob("slurm-*.out"))
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if "OUTPUT:" not in text:
+            continue
+        out: dict = {"file": path.name, "finished": "simulation exiting successfully" in text}
+        keys = {"N": "N", "wt %": "wt", "wt % (ME)": "wt_me", "qst": "qst"}
+        for name, value, err in _LOG_VALUE.findall(text):  # the last block wins
+            try:
+                out[keys[name]] = (float(value), float(err) if err else None)
+            except ValueError:
+                continue
+        steps = _LOG_STEP.findall(text)
+        if steps:
+            out["step"], out["steps"] = int(steps[-1][0]), int(steps[-1][1])
+        return out
+    return {}
+
+
+def isotherm_log_table(base_dir: str) -> str:
+    """MPMC's own uptake, error bars, wt% and Qst for each pressure folder, as text, with a
+    line for every run that has not finished. '' when no folder has a log."""
+    base = Path(base_dir)
+    if not base.is_dir():
+        return ""
+    rows = []
+    for p_dir in sorted(base.iterdir()):
+        if not p_dir.is_dir() or not p_dir.name.startswith("P_"):
+            continue
+        p_str = p_dir.name.replace("P_", "").replace("_atm", "").replace("p", ".").replace("m", "-")
+        try:
+            pressure = float(p_str)
+        except ValueError:
+            continue
+        log = read_mpmc_log(p_dir)
+        if log:
+            rows.append((pressure, log))
+    if not rows:
+        return ""
+    rows.sort(key=lambda r: r[0])
+
+    def pm(log: dict, key: str, fmt: str) -> str:
+        if key not in log:
+            return "-"
+        value, err = log[key]
+        return f"{value:{fmt}}" + (f" ± {err:{fmt}}" if err is not None else "")
+
+    lines = ["MPMC's own averages (whole run, from the log files):", "",
+             f"{'P (atm)':>10}  {'N (molecules)':>20}  {'wt %':>18}  {'Qst (kJ/mol)':>12}"]
+    unfinished = []
+    for pressure, log in rows:
+        lines.append(f"{pressure:>10g}  {pm(log, 'N', '.3f'):>20}  {pm(log, 'wt', '.4f'):>18}  "
+                     f"{pm(log, 'qst', '.3f'):>12}")
+        if not log["finished"]:
+            done = f" (step {log['step']}/{log['steps']})" if "step" in log else ""
+            unfinished.append(f"⚠ {pressure:g} atm has not finished{done}; its numbers will "
+                              f"still change.")
+    lines += [""] + unfinished
+    lines.append("The plot shows the average of N over the last quarter of energy.dat; MPMC's "
+                 "average covers the whole run, including equilibration, so the two differ "
+                 "until the run is long.")
+    return "\n".join(lines)

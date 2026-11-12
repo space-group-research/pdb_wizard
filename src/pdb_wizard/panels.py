@@ -31,6 +31,7 @@ from pdb_wizard.molecule import Molecule
 OPERATIONS = [
     # ---- Analysis (mirrors top bar Analysis menu) ----
     ("info",           "System Info",              "analysis"),
+    ("check",          "Check Structure",          "analysis"),
     ("void_vol",       "Void Volume",              "analysis"),
     ("surface_area",   "Surface Area",             "analysis"),
     ("pore_size",      "Pore Size Distribution",   "analysis"),

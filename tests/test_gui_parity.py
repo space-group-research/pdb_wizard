@@ -261,7 +261,7 @@ def test_reports_match(qtbot, command):
 
 # terminal Operations-panel command -> what the GUI calls for it
 GUI_FOR_TUI_COMMAND = {
-    "info": "open_tool", "void_vol": "open_tool", "surface_area": "open_tool",
+    "info": "open_tool", "check": "open_tool", "void_vol": "open_tool", "surface_area": "open_tool",
     "pore_size": "open_tool", "rdf": "open_tool", "coordination": "open_tool",
     "hbonds": "open_tool", "msd": "open_tool", "rmsd": "open_tool", "gyration": "open_tool",
     "density": "open_tool", "density3d": "density_3d", "pxrd": "open_tool",
@@ -297,7 +297,7 @@ def test_every_terminal_operation_has_a_gui_counterpart(qtbot):
     assert not missing, f"terminal operations without a GUI counterpart: {missing}"
     for cmd, attr in GUI_FOR_TUI_COMMAND.items():
         assert callable(getattr(w, attr)), (cmd, attr)
-    gui_keys = set(ANALYSES) | {"info", "void_vol", "surface_area", "density3d",
+    gui_keys = set(ANALYSES) | {"info", "check", "void_vol", "surface_area", "density3d",
                                               "energy_plot", "input_generator", "db_search"}
     analysis_cmds = {c for c, _, group in OPERATIONS if group == "analysis"}
     assert analysis_cmds <= gui_keys

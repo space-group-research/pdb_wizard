@@ -19,6 +19,7 @@ from pdb_wizard.analyses import (
     ALL_ATOMS,
     AnalysisResult,
     charge_report,
+    check_text,
     elements_of,
     energy_columns,
     energy_n_steps,
@@ -84,6 +85,7 @@ CLASSIC_FEATURES: Dict[str, str] = {
     "density3d": "main 11 > 12",
     "pxrd": "main 11 > 13",
     "energy_plot": "main 11 > 14",
+    "check": "main 11 > 15",
     "input_generator": "main 14",
     "isotherm_plot": "main 15",
     "db_search": "main 16",
@@ -128,6 +130,7 @@ CM_ANALYSES = [
     ("density3d", "3D density map"),
     ("pxrd", "powder XRD"),
     ("energy_plot", "energy plot"),
+    ("check", "check structure"),
 ]
 
 _CM_QUIT = ("q", "quit")
@@ -284,6 +287,8 @@ def _cm_run_analysis(key: str, mol: Molecule, frames: Optional[list], filename: 
     first = elements[0] if elements else ""
     if key == "info":
         print("\n" + system_info_text(mol, filename) + "\n")
+    elif key == "check":
+        print("\n" + check_text(mol, frames) + "\n")
     elif key == "void_vol":
         print("\n" + void_volume_text(mol) + "\n")
     elif key == "surface_area":
@@ -769,6 +774,16 @@ def _cm_format_default(value: object) -> str:
     return str(value)
 
 
+def _cm_check_range(var, value) -> None:
+    """Whole-number fields have the limits the viewers' spin boxes enforce."""
+    if var.kind != "int":
+        return
+    lo = int(var.min_val) if var.min_val is not None else 0
+    hi = int(var.max_val) if var.max_val is not None else 99
+    if not lo <= value <= hi:
+        raise ValueError(f"{var.label} must be between {lo} and {hi}")
+
+
 def cm_menu_inputs(mol: Molecule, filename: str) -> None:
     """Generate MPMC, CP2K or OpenMM inputs from the same forms the viewers show."""
     keys = list(ENGINES)
@@ -791,7 +806,9 @@ def cm_menu_inputs(mol: Molecule, filename: str) -> None:
                     break
                 raw = _cm_ask(var.label, _cm_format_default(var.default))
                 try:
-                    values[var.name] = parse_form_value(var, raw)
+                    value = parse_form_value(var, raw)
+                    _cm_check_range(var, value)
+                    values[var.name] = value
                     break
                 except ValueError as e:
                     print(f"!!! Error: {e} !!!")

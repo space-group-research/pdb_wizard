@@ -947,8 +947,9 @@ def test_input_generator_writes_the_same_files_as_the_shared_generator(hkust, tm
         assert ref.ok
     dlg.show_template()
     assert dlg.preview.toPlainText().startswith("-- openmm_nvt.py --")
-    dlg.validate()
-    assert dlg.status.text() == "Ready to generate"
+    dlg.validate()  # OpenMM's stock force field has no templates for a MOF: a caution
+    assert dlg.status.text() == "1 warning — review then Generate"
+    assert "No template found for residue" in dlg.preview.toPlainText()
 
 
 def test_input_generator_keeps_values_per_engine_and_rejects_bad_input(hkust):

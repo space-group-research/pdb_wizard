@@ -102,7 +102,34 @@ def check_engine(mol: Molecule, engine: str,
         problems.append("OpenMM NPT requires a periodic box.")
     if problems:
         return GenOutcome(False, "Fix issues before Generate", "✗ " + "\n✗ ".join(problems))
+    cautions = engine_cautions(mol, engine, values)
+    if cautions:
+        n = _plural_s(len(cautions), "warning")
+        return GenOutcome(True, f"{n} — review then Generate", "⚠ " + "\n\n⚠ ".join(cautions))
     return GenOutcome(True, "Ready to generate", "✓ No engine-level problems detected.")
+
+
+def engine_cautions(mol: Molecule, engine: str,
+                    values: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Things the CP2K and OpenMM templates do not handle for this structure. They do not
+    stop generation; they say what to change in the generated files."""
+    from pdb_wizard.checks import open_shell_metals, openmm_template_warning
+    out: List[str] = []
+    if engine.startswith("cp2k"):
+        metals = open_shell_metals(mol)
+        if metals:
+            out.append(
+                f"{', '.join(metals)} usually has unpaired electrons, and the generated input "
+                f"is closed-shell. Add UKS to &DFT and set MULTIPLICITY (and check the "
+                f"charge) before running, or the SCF will converge to the wrong state or "
+                f"not at all.")
+    if engine.startswith("openmm"):
+        from pdb_wizard.templates import engine_defaults
+        ff = str((values or {}).get("forcefield") or engine_defaults(engine)["forcefield"])
+        warning = openmm_template_warning(mol, ff)
+        if warning:
+            out.append(warning)
+    return out
 
 
 def engine_template_text(engine: str) -> GenOutcome:
@@ -165,6 +192,11 @@ def _generate_mpmc(mol: Molecule, values: Dict[str, Any], outdir: str) -> GenOut
                       "\n".join(lines))
 
 
+def _caution_block(mol: Molecule, engine: str, values: Dict[str, Any]) -> str:
+    cautions = engine_cautions(mol, engine, values)
+    return ("\n\n⚠ " + "\n\n⚠ ".join(cautions)) if cautions else ""
+
+
 def _generate_cp2k(mol: Molecule, values: Dict[str, Any], outdir: str, mode: str) -> GenOutcome:
     from pdb_wizard.sim_inputs import generate_cp2k_input
     if mol.pbc is None:
@@ -181,7 +213,8 @@ def _generate_cp2k(mol: Molecule, values: Dict[str, Any], outdir: str, mode: str
     return GenOutcome(True, f"Wrote {result['input']}",
                    f"Wrote CP2K {mode} input:\n  {result['input']}\n  {result['xyz']}\n\n"
                    f"Elements: {', '.join(result['elements'])}\n\n"
-                   f"To run: cd {outdir} && cp2k -i {Path(result['input']).name} -o out.log")
+                   f"To run: cd {outdir} && cp2k -i {Path(result['input']).name} -o out.log"
+                   + _caution_block(mol, f"cp2k_{mode}", values))
 
 
 def _generate_openmm(mol: Molecule, values: Dict[str, Any], outdir: str,
@@ -196,4 +229,5 @@ def _generate_openmm(mol: Molecule, values: Dict[str, Any], outdir: str,
     result = generate_openmm_script(mol, outdir, ensemble=ensemble, **kwargs)
     return GenOutcome(True, f"Wrote {result['script']}",
                    f"Wrote OpenMM {ensemble} driver:\n  {result['script']}\n  {result['pdb']}\n\n"
-                   f"To run: cd {outdir} && python {Path(result['script']).name}")
+                   f"To run: cd {outdir} && python {Path(result['script']).name}"
+                   + _caution_block(mol, f"openmm_{ensemble.lower()}", values))

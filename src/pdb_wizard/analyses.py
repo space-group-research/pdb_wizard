@@ -14,12 +14,13 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from pdb_wizard.checks import mc_trajectory_warning, structure_check_text
 from pdb_wizard.coordination import compute_coordination, compute_coordination_trajectory
 from pdb_wizard.density3d import compute_density_3d
 from pdb_wizard.density_profile import compute_density_profile, compute_density_profile_trajectory
 from pdb_wizard.gyration import compute_gyration_trajectory
 from pdb_wizard.hbonds import count_hbonds_trajectory, detect_hbonds
-from pdb_wizard.isotherm import parse_isotherm_results
+from pdb_wizard.isotherm import isotherm_log_table, parse_isotherm_results
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.msd import compute_diffusion_constant, compute_msd
 from pdb_wizard.operations import (
@@ -111,7 +112,7 @@ def unavailable(key: str, mol: Optional[Molecule], frames: Optional[list]) -> Op
         return "Need a crystal structure with PBC for PXRD"
     if mol is None:
         return "No atoms loaded"
-    if key in ("info", "input_generator"):
+    if key in ("info", "input_generator", "check"):
         return None
     if not mol.atoms:
         return "No atoms loaded yet" if key == "rdf" else "No atoms loaded"
@@ -172,6 +173,11 @@ def surface_area_text(mol: Molecule, n_samples: int = 100000, probe: float = 1.4
         f"  Surface area: {r.get('surface_area', 0):.1f} A^2",
         f"  Specific area: {r.get('area_per_volume', 0):.1f} m^2/g",
     ])
+
+
+def check_text(mol: Optional[Molecule], frames: Optional[list] = None) -> str:
+    """The Check Structure report (see ``checks``)."""
+    return structure_check_text(mol, frames)
 
 
 def charge_report(mol: Molecule) -> str:
@@ -303,7 +309,8 @@ def run_msd(frames: list, element: str, name: str = ALL_ATOMS, dt: float = 1.0, 
         summary = f"D = {D:.4e} cm^2/s  (slope = {slope:.4f} A^2/ps)"
     return AnalysisResult(lags * dt, msd, f"MSD {nm or element}", "time (ps)", summary,
                           "lag_frames,msd_A2", y_max=_grow(msd), extra={"D": D},
-                          csv_data=(lags, msd))
+                          csv_data=(lags, msd),
+                          text=mc_trajectory_warning(frames, "a diffusion constant"))
 
 
 def run_rmsd(frames: list, element: str = ALL_ATOMS, name: str = ALL_ATOMS, dt: float = 1.0,
@@ -318,7 +325,8 @@ def run_rmsd(frames: list, element: str = ALL_ATOMS, name: str = ALL_ATOMS, dt: 
     avg = float(vals[len(vals) // 2:].mean())
     return AnalysisResult(idx * dt, vals, f"RMSD ({el or 'all'})", "time (ps)",
                           f"RMSD avg (2nd half) = {avg:.3f} A  |  max = {vals.max():.3f} A",
-                          "frame,rmsd_A", y_max=_grow(vals), csv_data=(idx, vals))
+                          "frame,rmsd_A", y_max=_grow(vals), csv_data=(idx, vals),
+                          text=mc_trajectory_warning(frames, "an RMSD against time"))
 
 
 def run_gyration(frames: list, element: str = ALL_ATOMS, dt: float = 1.0, start: int = 1,
@@ -500,7 +508,8 @@ def run_isotherm(directory: str) -> AnalysisResult:
     u = np.array([r[1] for r in results])
     return AnalysisResult(p, u, "Adsorption Isotherm", "pressure (atm)",
                           f"{len(p)} pressure points from {directory}",
-                          "pressure_atm,avg_molecules", y_max=_grow(u))
+                          "pressure_atm,avg_molecules", y_max=_grow(u),
+                          text=isotherm_log_table(directory))
 
 
 def write_csv(path: str, header: str, *arrays: Sequence[float]) -> None:

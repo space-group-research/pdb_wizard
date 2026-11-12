@@ -143,8 +143,8 @@ def test_every_viewer_feature_is_in_the_classic_menu():
 def test_analysis_menu_lists_every_analysis():
     keys = [k for k, _ in mt.CM_ANALYSES]
     assert all(mt.CLASSIC_FEATURES[k] == f"main 11 > {i}" for i, k in enumerate(keys, 1))
-    _, prompts, _ = drive(mt.cm_menu_analysis, ["15"], mixed_mol(), None, "t.pdb")
-    assert len(options(prompts[0])) == 15
+    _, prompts, _ = drive(mt.cm_menu_analysis, ["16"], mixed_mol(), None, "t.pdb")
+    assert len(options(prompts[0])) == 16
 
 
 # ---- analyses give the shared functions' numbers -----------------------------------------
@@ -152,14 +152,14 @@ def test_analysis_menu_lists_every_analysis():
 
 def test_system_info_matches_shared_text():
     mol = mixed_mol()
-    _, _, out = drive(mt.cm_menu_analysis, ["1", "15"], mol, None, "t.pdb")
+    _, _, out = drive(mt.cm_menu_analysis, ["1", "16"], mol, None, "t.pdb")
     assert system_info_text(mol, "t.pdb") in out
 
 
 def test_rdf_matches_shared_run_and_writes_csv(tmp_path):
     mol = mixed_mol()
     csv = tmp_path / "rdf.csv"
-    _, _, out = drive(mt.cm_menu_analysis, ["5", "C", "O", "", "", "", "", str(csv), "15"],
+    _, _, out = drive(mt.cm_menu_analysis, ["5", "C", "O", "", "", "", "", str(csv), "16"],
                       mol, None, "t.pdb")
     ref = run_rdf(mol, "C", "O")
     assert ref.summary in out and ref.title in out
@@ -171,21 +171,21 @@ def test_rdf_matches_shared_run_and_writes_csv(tmp_path):
 def test_trajectory_rdf_uses_the_frame_range():
     frames = water_trajectory()
     _, _, out = drive(mt.cm_menu_analysis,
-                      ["5", "O", "H", "", "", "", "", "2", "9", "", "15"], frames[0], frames, "t")
+                      ["5", "O", "H", "", "", "", "", "2", "9", "", "16"], frames[0], frames, "t")
     ref = run_rdf(frames[0], "O", "H", frames=frames, start=2, end=9)
     assert "frames 2-9" in ref.title and ref.title in out and ref.summary in out
 
 
 def test_msd_matches_shared_run():
     frames = water_trajectory()
-    _, _, out = drive(mt.cm_menu_analysis, ["8", "O", "", "", "", "", "", "15"],
+    _, _, out = drive(mt.cm_menu_analysis, ["8", "O", "", "", "", "", "", "16"],
                       frames[0], frames, "t.xyz")
     assert run_msd(frames, "O").summary in out
 
 
 def test_pxrd_matches_shared_run():
     mol = read_file(str(HKUST))
-    _, _, out = drive(mt.cm_menu_analysis, ["13", "", "", "", "", "15"], mol, None, "h.pdb")
+    _, _, out = drive(mt.cm_menu_analysis, ["13", "", "", "", "", "16"], mol, None, "h.pdb")
     assert run_pxrd(mol).summary in out
 
 
@@ -194,7 +194,7 @@ def test_pxrd_matches_shared_run():
     ("11", ["C", "", "", ""]),
 ])
 def test_single_structure_analyses_run(option, inputs):
-    _, _, out = drive(mt.cm_menu_analysis, [option, *inputs, "15"], mixed_mol(), None, "t.pdb")
+    _, _, out = drive(mt.cm_menu_analysis, [option, *inputs, "16"], mixed_mol(), None, "t.pdb")
     assert "Error" not in out and "Invalid" not in out
 
 
@@ -204,19 +204,19 @@ def test_single_structure_analyses_run(option, inputs):
 ])
 def test_trajectory_analyses_run(option, inputs):
     frames = water_trajectory()
-    _, _, out = drive(mt.cm_menu_analysis, [option, *inputs, "15"], frames[0], frames, "t.xyz")
+    _, _, out = drive(mt.cm_menu_analysis, [option, *inputs, "16"], frames[0], frames, "t.xyz")
     assert "Error" not in out and "Invalid" not in out
 
 
 def test_trajectory_only_analyses_explain_themselves_on_one_structure():
-    _, _, out = drive(mt.cm_menu_analysis, ["8", "10", "12", "15"], mixed_mol(), None, "t.pdb")
+    _, _, out = drive(mt.cm_menu_analysis, ["8", "10", "12", "16"], mixed_mol(), None, "t.pdb")
     assert "Need a trajectory with 3+ frames for MSD" in out
     assert "Need a trajectory for Rg" in out
 
 
 def test_q_cancels_an_analysis_and_bad_numbers_are_reasked():
     _, _, out = drive(mt.cm_menu_analysis, ["5", "C", "q", "5", "Zz", "C", "O", "", "", "abc",
-                                            "", "", "", "15"], mixed_mol(), None, "t.pdb")
+                                            "", "", "", "16"], mixed_mol(), None, "t.pdb")
     assert "Cancelled" in out and "No Zz atoms" in out and "enter a number" in out
 
 
@@ -225,7 +225,7 @@ def test_energy_plot_and_csv(tmp_path):
     energy.write_text("#step energy N\n" + "".join(f"{i} {-i * 1.5} {i % 7}\n"
                                                    for i in range(1, 41)))
     csv = tmp_path / "e.csv"
-    _, _, out = drive(mt.cm_menu_analysis, ["14", "", "energy", "5", "30", str(csv), "15"],
+    _, _, out = drive(mt.cm_menu_analysis, ["14", "", "energy", "5", "30", str(csv), "16"],
                       mixed_mol(), None, str(tmp_path / "s.pdb"))
     assert "energy (steps 5-30)" in out
     assert len(csv.read_text().splitlines()) == 27
@@ -569,9 +569,23 @@ def test_movie_menu_new_options(tmp_path):
     frames = water_trajectory(4)
     out_cif = tmp_path / "f.cif"
     _, _, out = drive(menu._main_loop_movie,
-                      ["11", "1", "15", "12", "2", "2", "O S", "6", "17", "17",
+                      ["11", "1", "16", "12", "2", "2", "O S", "6", "17", "17",
                        "13", "1", "1", str(out_cif), "6", "15", str(tmp_path), "9"],
                       frames, "t.xyz")
     assert "Replaced 10 O atoms with S" in out and "Undid the last change" in out
     assert "Nothing to undo" in out and "No completed pressure points" in out
     assert out_cif.exists()
+
+
+def test_inputs_enforce_the_same_limits_as_the_viewers(tmp_path):
+    """The viewers' spin boxes cannot go below 1000 MC steps; the menu must not either."""
+    mol = read_file(str(HKUST))
+    spec = mt.ENGINES["mpmc_isotherm"]
+    names = [v.name for v in spec.user_vars]
+    answers = [""] * len(names)
+    answers[names.index("pressures")] = "1.0"
+    i = names.index("numsteps")
+    scripted = [str(list(mt.ENGINES).index("mpmc_isotherm") + 1), *answers[:i], "300", "1000",
+                *answers[i + 1:], "q"]  # q at the output-folder prompt: nothing written
+    _, _, out = drive(mt.cm_menu_inputs, scripted, mol, "h.pdb")
+    assert "MC steps per point must be between 1000 and 100000000" in out
