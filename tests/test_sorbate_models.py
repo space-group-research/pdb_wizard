@@ -71,3 +71,29 @@ def test_models_match_the_mpmc_repo(key):
 
     np.testing.assert_allclose(distances([np.array([s.x, s.y, s.z]) for s in ours]),
                                distances([r[1] for r in repo]), atol=2e-3)
+
+
+# ---- the MPMC input form offers every built-in model ----------------------------------------
+
+
+def test_mpmc_form_offers_exactly_the_builtin_models():
+    from pdb_wizard.sorbates import SORBATE_MODELS
+    from pdb_wizard.templates import ENGINES, engine_defaults
+    var = next(v for v in ENGINES["mpmc_isotherm"].user_vars if v.name == "sorbate")
+    assert var.choices == tuple(SORBATE_MODELS)
+    assert engine_defaults("mpmc_isotherm")["sorbate"] == "h2_bss" in var.choices
+
+
+def test_every_offered_sorbate_generates_inputs(tmp_path):
+    """No dead entries: each choice in the form writes an isotherm folder."""
+    from pathlib import Path
+
+    from pdb_wizard.io import read_file
+    from pdb_wizard.isotherm import generate_isotherm
+    from pdb_wizard.templates import ENGINES
+    mol = read_file(str(Path(__file__).resolve().parent.parent / "HKUST-1.pdb"))
+    var = next(v for v in ENGINES["mpmc_isotherm"].user_vars if v.name == "sorbate")
+    for name in var.choices:
+        dirs = generate_isotherm(mol, sorbate_model=name, temperature=77.0, pressures=[1.0],
+                                 output_dir=str(tmp_path / name))
+        assert len(dirs) == 1 and (Path(dirs[0]) / "mpmc.inp").exists(), name
