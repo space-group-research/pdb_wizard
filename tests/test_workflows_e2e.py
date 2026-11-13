@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -136,16 +137,27 @@ def classic_form(engine: str, outdir, **changed) -> list:
 # ---- terminal viewer driver ---------------------------------------------------------------
 
 
-async def wait_for(pilot, cond, what, tries=400):
-    for _ in range(tries):
+WAIT_SECONDS = 180  # generous: shared CI runners are several times slower than a desktop
+
+
+async def wait_for(pilot, cond, what, seconds=WAIT_SECONDS):
+    """Poll ``cond`` until it holds. The limit is wall-clock time, not a number of polls,
+    so a slow machine gets the same chance as a fast one."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
         await pilot.pause(0.05)
         if cond():
             return
-    raise AssertionError(f"timed out waiting for {what}")
+    raise AssertionError(f"timed out after {seconds} s waiting for {what}")
 
 
 async def on_screen(pilot, app, cls):
-    await wait_for(pilot, lambda: isinstance(app.screen, cls), cls.__name__)
+    """The screen of type ``cls`` once it is on top and has finished mounting, so that a
+    click sent next lands on a laid-out widget."""
+    await wait_for(pilot, lambda: isinstance(app.screen, cls) and app.screen.is_mounted,
+                   cls.__name__)
+    await pilot.pause()
+    await pilot.pause()
     return app.screen
 
 
@@ -157,9 +169,21 @@ async def read_info(pilot, app) -> str:
     """The text of the report on screen, then OK."""
     modal = await on_screen(pilot, app, InfoModal)
     text = modal.query_one("#info-text", TextArea).text
-    await pilot.click("#info-ok")
-    await wait_for(pilot, lambda: not isinstance(app.screen, InfoModal), "report to close")
+    await close_screen(pilot, app, modal, "#info-ok")
     return text
+
+
+async def close_screen(pilot, app, screen, button: str) -> None:
+    """Click ``button`` until ``screen`` is gone. A click sent while the screen is still
+    being laid out can be lost on a loaded machine, so it is repeated."""
+    deadline = time.monotonic() + WAIT_SECONDS
+    while app.screen is screen and time.monotonic() < deadline:
+        await pilot.click(button)
+        for _ in range(20):
+            await pilot.pause(0.05)
+            if app.screen is not screen:
+                return
+    assert app.screen is not screen, f"{type(screen).__name__} did not close"
 
 
 async def save_as(pilot, app, path) -> None:

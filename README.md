@@ -1,20 +1,28 @@
 # PDB Wizard
 
+[![tests](https://github.com/space-group-research/pdb_wizard/actions/workflows/tests.yml/badge.svg)](https://github.com/space-group-research/pdb_wizard/actions/workflows/tests.yml)
+
 Structure handling for porous-materials simulations: read, clean up, extend and inspect
 crystal structures, assign force fields and charges, pack sorbate molecules, and write
-inputs for MPMC, CP2K, OpenMM and LAMMPS. It runs as an interactive 3D terminal viewer,
-a classic text menu, or a batch command-line tool.
+inputs for MPMC, CP2K, CRYSTAL23, OpenMM and LAMMPS. It runs as a desktop window, an
+interactive 3D terminal viewer, a classic text menu, or a batch command-line tool. The three
+interactive front ends have the same features and give the same numbers.
 
 Developed in the [Space group](https://drbrian.space) at NC State University.
 
 ## Install
 
 ```bash
-pip install "pdb-wizard[viewer] @ git+https://github.com/space-group-research/pdb_wizard"
+pip install "pdb-wizard[viewer,gui,symmetry] @ git+https://github.com/space-group-research/pdb_wizard"
 ```
 
-`[viewer]` adds [textual](https://textual.textualize.io) for the terminal viewer. Without it,
-everything except the viewer works (the batch tools and `--classic` menu run on Python 3.7+).
+Python 3.9 or newer. The only required dependency is NumPy; the extras are optional:
+
+| Extra | Adds | Without it |
+|---|---|---|
+| `viewer` | [textual](https://textual.textualize.io) and Pillow: the terminal viewer | `pdb_wizard file` falls back to the classic menu |
+| `gui` | PySide6 and Pillow: the desktop window (`--gui`) | `--gui` prints how to install it |
+| `symmetry` | [spglib](https://spglib.readthedocs.io): Find Symmetry and symmetry-reduced CRYSTAL23 inputs | CRYSTAL23 inputs are written in P1 |
 
 A single-file version, `pdb_wizard.py`, needs only NumPy. Build it with `python build.py`
 (written to `dist/`); the group ships it in
@@ -32,13 +40,64 @@ pdb_wizard --help                   # all batch options (--rdf, --msd, --surface
 ```
 
 Reads PDB (standard, pdb2pqr and MPMC dialects), CIF, XYZ, POSCAR, LAMMPS data, SDF, MOL2,
-Gaussian, Z-matrix, DCD and multi-frame PDB/XYZ trajectories.
+Gaussian, Z-matrix, CRYSTAL output (`.out`), DCD and multi-frame PDB/XYZ trajectories. Writes
+XYZ, PDB, MPMC, CIF, POSCAR, LAMMPS data and CRYSTAL23 `.d12`.
+
+### Before you simulate: Check Structure
+
+*Analysis > Check Structure* (classic menu: 11, then 15) looks for the mistakes that give a
+wrong simulation without an error message. It never changes the structure.
+
+- A CIF that names a space group but lists no symmetry operators is read as P1, so you only
+  have the asymmetric unit. Partially occupied and disordered sites are all kept as full
+  atoms. Both are reported when the file is opened and again in the check.
+- Atoms closer than 0.7 Å, no hydrogens on an organic framework, unknown elements.
+- No charges, a net charge, or elements the force field has no parameters for.
+- A cell too small for a 10 Å cutoff, with the supercell that fixes it.
+- Open-shell metals (the generated CP2K input is closed-shell: add `UKS` and a
+  `MULTIPLICITY`).
+- A Monte Carlo trajectory: MSD and RMSD on one are not physical, and say so.
+
+Other guard rails: *Delete Lone Atoms* shows what it would remove and warns when that
+includes framework metals (it finds all 48 Cu in HKUST-1, because metal-ligand bonds are
+longer than its contact test); the isotherm plot also lists MPMC's own N, wt% and Qst with
+error bars from the run logs and names runs that have not finished; the OpenMM generator
+warns that the stock Amber force fields have no templates for a framework.
+
+QEq charges are a quick estimate. In test runs on HKUST-1 they were about half the size of
+DFT-derived charges, which is too weak for polar sorbates such as CO2. Use fitted charges
+(for example CP2K RESP, which can be loaded directly from the `.resp` file) for production
+work.
+
+### CRYSTAL23
+
+*Save as CRYSTAL23 .d12* (classic menu: 13, then 7) writes a complete cell-optimisation
+input from the group's template (HSE06/POB-TZVP-REV2). You are asked for a space group:
+
+- `1` writes every atom in P1. Always valid, and the most expensive way to run CRYSTAL.
+- A number from *Analysis > Find Symmetry* writes only that group's asymmetric unit in the
+  conventional cell. HKUST-1 goes from 624 atoms to 6 in Fm-3m (225).
+
+*Find Symmetry* searches at a ladder of tolerances and lists each space group with the
+tolerance that finds it and how far atoms have to move to fit it exactly, so an approximate
+symmetry is not mistaken for a real one. The geometry block follows the CRYSTAL manual
+(minimal cell parameters per crystal system, hexagonal axes for rhombohedral groups, unique
+axis b, and the origin flag set for groups with two origin settings). It has been checked
+against the manual's examples but not yet against a CRYSTAL run: try one small job first.
+A CRYSTAL `.out` opens as the final geometry in the primitive cell.
+
+### Classic menu
+
+`--classic` keeps the original numbered menu, and the original numbers never change (main
+menu 1-10, geometry menu 1-9), so input scripts written for the old `pdb_wizard.py` still
+work. Everything newer is appended: 11 analysis, 12 edit, 13 other formats and pictures,
+14 simulation inputs, 15 isotherm results, 16 database, 17 undo, 18 open another file.
 
 ### Desktop window
 
-![PDB Wizard's desktop window: HKUST-1 with packed DC97 water](docs/gui.png)
+![PDB Wizard's desktop window showing HKUST-1](docs/gui.png)
 
-![An analysis window: the Cu–O radial distribution in HKUST-1](docs/gui-analysis.png)
+![An analysis window: a radial distribution function in HKUST-1](docs/gui-analysis.png)
 
 `pdb_wizard --gui` has everything the terminal viewer has, in windows and menus:
 
@@ -47,11 +106,12 @@ Gaussian, Z-matrix, DCD and multi-frame PDB/XYZ trajectories.
   perspective or orthographic, dark or light background, lighting and size sliders. Drag to
   rotate, right-drag to pan, wheel to zoom; the terminal viewer's keys work too (`v`, `C`,
   `#`, `w`, `P`, `O`, `m`, `t`, `c`, `r`, `,`/`.`).
-- **Measure**: in measure mode two clicks pin a distance; shift-click two or three atoms
-  for a distance or angle.
+- **Measure**: in measure mode two clicks pin a distance; shift-click two, three or four
+  atoms for a distance, angle or dihedral. *Help > Keyboard and mouse* (F1) lists every
+  control.
 - **Tabs and trajectories**: each file opens in a tab; multi-frame PDB/XYZ and DCD files
   get a frame slider with play, speed and "open frame in new tab".
-- **Edit** (with undo): wrap, sort, supercells and reducing them back (choosing which
+- **Edit** (with undo and redo): wrap, sort, supercells and reducing them back (choosing which
   sorbates to keep), delete lone atoms, set X–H distances, update or remove the cell,
   substitute elements, edit coordinates, QEq or file charges, force fields, and sorbate
   packing.
@@ -87,9 +147,12 @@ starting μVT from it.
 ## Tests
 
 ```bash
-pip install -e ".[viewer,test]" pytest-asyncio pytest-xdist hypothesis python-minifier
-pytest -n auto
+pip install -e ".[viewer,gui,symmetry,test]"
+QT_QPA_PLATFORM=offscreen pytest -n auto
 ```
+
+GitHub Actions runs this on Python 3.9 and 3.12 for every push and pull request, and
+checks that the single-file build runs with NumPy alone.
 
 Optional suites:
 
@@ -103,7 +166,10 @@ The test run builds `dist/pdb_wizard.py` first, so the single-file version is te
 desktop-window tests run headless (`QT_QPA_PLATFORM=offscreen`) and skip without PySide6 and
 pytest-qt. `tests/test_gui_parity.py` runs every analysis in both the desktop window and the
 terminal viewer and requires identical results, and fails if a terminal-viewer operation has
-no desktop counterpart.
+no desktop counterpart; `tests/test_classic_parity.py` does the same for the classic menu.
+`tests/test_workflows_e2e.py` runs whole workflows (CIF to an MPMC framework, an isotherm set
+up, run and plotted, CP2K and OpenMM inputs) through all three front ends and compares the
+files they write.
 
 ## License
 

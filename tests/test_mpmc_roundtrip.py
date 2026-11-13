@@ -224,7 +224,8 @@ def test_writer_does_not_modify_its_input():
     written_records(mol)
     after = [(a.name, a.x.copy(), a.mpmc_flag, a.mpmc_mol) for a in mol.atoms]
     assert len(before) == len(after)
-    for b, a in zip(before, after, strict=True):
+    assert len(before) == len(after)
+    for b, a in zip(before, after):
         assert b[0] == a[0] and np.array_equal(b[1], a[1]) and b[2:] == a[2:]
 
 

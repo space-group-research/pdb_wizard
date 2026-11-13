@@ -116,7 +116,7 @@ def test_seed_is_reproducible():
     mol = framework(pw.PBC(20, 20, 20, 90, 90, 90))
     a = pw.insert_sorbates(mol, "h2o_dc97", 5, seed=7)
     b = pw.insert_sorbates(mol, "h2o_dc97", 5, seed=7)
-    assert all(np.allclose(x, y) for x, y in zip(a, b, strict=True))
+    assert len(a) == len(b) and all(np.allclose(x, y) for x, y in zip(a, b))
 
 
 def test_requires_cell():
@@ -309,7 +309,7 @@ def test_model_name_and_object_are_equivalent():
     mol = framework(pw.PBC(20, 20, 20, 90, 90, 90))
     a = pw.insert_sorbates(mol, "h2o_dc97", 4, seed=28)
     b = pw.insert_sorbates(mol, pw.SORBATE_MODELS["h2o_dc97"], 4, seed=28)
-    assert all(np.allclose(x, y) for x, y in zip(a, b, strict=True))
+    assert len(a) == len(b) and all(np.allclose(x, y) for x, y in zip(a, b))
 
 
 def test_input_molecule_is_not_modified():
@@ -317,7 +317,8 @@ def test_input_molecule_is_not_modified():
     before = [a.x.copy() for a in mol.atoms]
     pw.insert_sorbates(mol, "h2o_dc97", 5, seed=29)
     assert len(mol.atoms) == len(before)
-    assert all(np.array_equal(a.x, b) for a, b in zip(mol.atoms, before, strict=True))
+    assert len(mol.atoms) == len(before)
+    assert all(np.array_equal(a.x, b) for a, b in zip(mol.atoms, before))
 
 
 def test_centers_are_uniform_in_an_empty_cell():
@@ -381,7 +382,7 @@ def test_template_packs_like_the_built_in_model(tmp_path):
     mol = framework(pw.PBC(20, 20, 20, 90, 90, 90))
     a = pw.insert_sorbates(mol, t, 4, seed=33)
     b = pw.insert_sorbates(mol, model, 4, seed=33)
-    assert all(np.allclose(x, y, atol=1e-5) for x, y in zip(a, b, strict=True))
+    assert len(a) == len(b) and all(np.allclose(x, y, atol=1e-5) for x, y in zip(a, b))
 
 
 # ---- formatting and the MPMC file -----------------------------------------------------
