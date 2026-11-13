@@ -121,7 +121,9 @@ class Molecule:
             frac = coords @ recip
             frac -= np.floor(frac)
 
-            box = np.array([self.pbc.a, self.pbc.b, self.pbc.c])
+            # grid cells must be at least `cutoff` thick; in a skewed cell their thickness
+            # comes from the perpendicular widths, which are shorter than the edges
+            box = self.pbc.perpendicular_widths()
             n_cells = np.maximum(1, (box / cutoff).astype(int))
             if n_cells.min() < 3:
                 self._detect_bonds_all_pairs(coords, bond_rs, progress_callback)

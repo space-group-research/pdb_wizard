@@ -55,12 +55,37 @@ def compute_rmsd(
     frame_idx = np.arange(n_frames, dtype=float)
     rmsd_vals = np.zeros(n_frames)
 
-    for fi, mol in enumerate(frames):
+    # Atoms that leave through a cell face come back on the other side. Follow them:
+    # count the cell crossings frame to frame (minimum image) and undo them, so a
+    # wrapped trajectory gives the displacement actually travelled.
+    unwrapped = []
+    last = None
+    n_seen = 0
+    crossings = np.zeros((n_atoms, 3))
+    for mol in frames:
         indices = [i for i, a in enumerate(mol.atoms) if atom_filter(a)]
         n_avail = min(len(indices), n_atoms)
+        pos = np.array([mol.atoms[indices[i]].x for i in range(n_avail)]).reshape(-1, 3)
+        pbc = mol.pbc if mol.pbc is not None else ref.pbc
+        if pbc is not None and n_avail:
+            if last is None:
+                last = np.zeros((n_atoms, 3))
+            n_known = min(n_avail, n_seen)  # atoms that were there in an earlier frame
+            crossings[:n_known] += np.round(
+                (pos[:n_known] - last[:n_known]) @ pbc.reciprocal_basis_matrix)
+            last[:n_avail] = pos
+            n_seen = max(n_seen, n_avail)
+            if crossings[:n_avail].any():
+                pos = pos - crossings[:n_avail] @ pbc.basis_matrix
+        unwrapped.append(pos)
+    if reference_frame != 0:
+        ref_pos = unwrapped[reference_frame]
+
+    for fi in range(n_frames):
+        pos = unwrapped[fi]
+        n_avail = min(len(pos), len(ref_pos))
         if n_avail == 0:
             continue
-        pos = np.array([mol.atoms[indices[i]].x for i in range(n_avail)])
         diff = pos[:n_avail] - ref_pos[:n_avail]
         rmsd_vals[fi] = np.sqrt(np.mean(np.sum(diff ** 2, axis=1)))
 

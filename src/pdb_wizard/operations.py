@@ -11,6 +11,7 @@ from typing import Any, Iterator, TextIO
 import numpy as np
 
 from pdb_wizard.atom import Atom
+from pdb_wizard.io import site_element
 from pdb_wizard.molecule import Molecule, set_atom_ids
 
 
@@ -40,10 +41,29 @@ def gcd_list(values: list[int]) -> int:
     return reduce(gcd, values)
 
 
+def site_mass(atom: Atom) -> float:
+    """Mass of an atom: the model's own value for a movable MPMC site (massless sites are
+    0, a united-atom site keeps its group mass), the element mass otherwise."""
+    if atom.mpmc_flag == "M" and atom.file_mass is not None:
+        return float(atom.file_mass)
+    return atom.mass
+
+
+def real_atoms(mol: Molecule) -> list:
+    """(atom, element) for every atom that is a real atom. Sites of MPMC sorbate models
+    get their true element ('COG' is carbon, not cobalt) and massless sites are left out."""
+    out = []
+    for atom in mol.atoms:
+        element = site_element(atom)
+        if element is not None:
+            out.append((atom, element))
+    return out
+
+
 def formula_unit(mol: Molecule) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for atom in mol.atoms:
-        sym = atom.element.symbol
+    for _atom, element in real_atoms(mol):
+        sym = element.symbol
         counts[sym] = counts.get(sym, 0) + 1
     return counts
 
@@ -130,12 +150,15 @@ def void_volume(mol: Molecule, n_samples: int = 100000, probe_radius: float = 0.
     Returns:
         Dict with void_volume (A^3), total_volume (A^3), void_fraction.
     """
-    if mol.pbc is None or len(mol.atoms) == 0:
+    if mol.pbc is None:
         return {"void_volume": 0.0, "total_volume": 0.0, "void_fraction": 0.0}
 
     pbc = mol.pbc
-    coords = np.array([a.x for a in mol.atoms])
-    vdw_radii = np.array([a.vdw for a in mol.atoms])
+    sites = real_atoms(mol)
+    if not sites:  # nothing in the cell: all of it is void
+        return {"void_volume": pbc.volume, "total_volume": pbc.volume, "void_fraction": 1.0}
+    coords = np.array([a.x for a, _ in sites])
+    vdw_radii = np.array([el.vdw_radius for _, el in sites])
 
     # Generate random fractional coordinates
     rng = np.random.default_rng(42)
@@ -162,7 +185,7 @@ def void_volume(mol: Molecule, n_samples: int = 100000, probe_radius: float = 0.
         basis = pbc.basis_matrix
         for ai in range(len(coords)):
             dx = cart_points - coords[ai]
-            frac_dx = dx @ recip.T
+            frac_dx = dx @ recip
             frac_dx -= np.round(frac_dx)
             wrapped = frac_dx @ basis
             dist_sq = (wrapped * wrapped).sum(axis=1)
@@ -198,14 +221,15 @@ def surface_area(
         Dict with ``surface_area`` (A^2) and ``area_per_volume`` (m^2/g,
         using total_mass * 1.66054e-24 for grams).
     """
-    if mol.pbc is None or len(mol.atoms) == 0:
+    sites = real_atoms(mol)
+    if mol.pbc is None or len(sites) == 0:
         return {"surface_area": 0.0, "area_per_volume": 0.0}
 
     pbc = mol.pbc
-    coords = np.array([a.x for a in mol.atoms])            # (N, 3)
-    vdw_radii = np.array([a.vdw for a in mol.atoms])        # (N,)
+    coords = np.array([a.x for a, _ in sites])              # (N, 3)
+    vdw_radii = np.array([el.vdw_radius for _, el in sites])  # (N,)
     radii = vdw_radii + probe_radius                        # (N,)
-    n_atoms = len(mol.atoms)
+    n_atoms = len(sites)
 
     # Distribute samples per atom proportional to sphere surface area (4*pi*r^2).
     areas = radii ** 2                                      # proportional to 4*pi*r^2
@@ -225,7 +249,9 @@ def surface_area(
     cutoff = 2 * r_max  # generous: any j within r_i+r_j ≤ 2*r_max
     # Map each atom to a wrapped fractional cell index
     frac = (coords @ recip) % 1.0
-    n_cells = max(1, int(min(pbc.a, pbc.b, pbc.c) // cutoff))
+    # cells must be at least `cutoff` thick: in a skewed cell that is set by the
+    # perpendicular widths, not by the edge lengths
+    n_cells = max(1, int(float(pbc.perpendicular_widths().min()) // cutoff))
     cell_idx = np.minimum((frac * n_cells).astype(int), n_cells - 1)
     cell_map: dict[tuple, list[int]] = {}
     for ai, (cx, cy, cz) in enumerate(cell_idx.tolist()):
@@ -295,7 +321,7 @@ def surface_area(
         frac_accessible = accessible.sum() / n_pts
         total_sa += frac_accessible * 4.0 * np.pi * r_i ** 2
 
-    total_mass = sum(a.mass for a in mol.atoms)
+    total_mass = sum(site_mass(a) for a in mol.atoms)
     mass_grams = total_mass * 1.66054e-24                   # amu -> grams
     # surface_area is in A^2; convert to m^2: 1 A^2 = 1e-20 m^2
     area_per_volume = (total_sa * 1e-20) / mass_grams if mass_grams > 0 else 0.0
@@ -332,13 +358,14 @@ def pore_size_distribution(
     bin_edges = np.linspace(0.0, max_pore, n_bins + 1)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
-    if mol.pbc is None or len(mol.atoms) == 0:
+    sites = real_atoms(mol)
+    if mol.pbc is None or len(sites) == 0:
         return bin_centers, np.zeros(n_bins)
 
     pbc = mol.pbc
-    coords = np.array([a.x for a in mol.atoms])            # (N, 3)
-    vdw_radii = np.array([a.vdw for a in mol.atoms])        # (N,)
-    n_atoms = len(mol.atoms)
+    coords = np.array([a.x for a, _ in sites])              # (N, 3)
+    vdw_radii = np.array([el.vdw_radius for _, el in sites])  # (N,)
+    n_atoms = len(sites)
 
     basis = pbc.basis_matrix                                # (3, 3)
     recip = pbc.reciprocal_basis_matrix                     # (3, 3)
@@ -383,7 +410,7 @@ def system_info(mol: Molecule, filename: str) -> dict[str, Any]:
             "alpha": pbc.alpha, "beta": pbc.beta, "gamma": pbc.gamma,
         }
         info["volume"] = pbc.volume
-        total_mass = sum(a.mass for a in mol.atoms)
+        total_mass = sum(site_mass(a) for a in mol.atoms)
         info["density"] = total_mass * 1.66054 / pbc.volume
         info["basis_matrix"] = pbc.basis_matrix.tolist()
     info["n_atoms"] = len(mol.atoms)
@@ -408,7 +435,7 @@ def print_info(mol: Molecule, filename: str) -> None:
         )
         for row in pbc.basis_matrix:
             print(f"{row[0]:20.14f} {row[1]:20.14f} {row[2]:20.14f}")
-        total_mass = sum(a.mass for a in mol.atoms)
+        total_mass = sum(site_mass(a) for a in mol.atoms)
         density = total_mass * 1.66054 / pbc.volume
         print(f"Volume: {pbc.volume:10.2f} A^3 Density: {density:10.4f} g/cm^3")
     counts = formula_unit(mol)

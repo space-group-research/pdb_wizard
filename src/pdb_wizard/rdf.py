@@ -13,6 +13,26 @@ def _select(mol: Molecule, element: str, name: str | None) -> np.ndarray:
                      and (name is None or a.name.strip() == name)], dtype=int)
 
 
+def half_cell_width(pbc) -> float:
+    """Half the smallest distance between opposite cell faces: the largest distance for
+    which the minimum image finds every pair. min(a, b, c) / 2 for an orthogonal cell."""
+    half = float(pbc.perpendicular_widths().min()) / 2.0
+    edge = min(pbc.a, pbc.b, pbc.c) / 2.0
+    return edge if abs(half - edge) <= 1e-9 * edge else half
+
+
+def image_shifts(pbc, r_max: float) -> np.ndarray:
+    """Lattice translations (in cell units, integer rows) needed besides the minimum image
+    to reach every pair within ``r_max``; the zero shift is not included. Empty when
+    ``r_max`` is within half the smallest cell width."""
+    if r_max <= half_cell_width(pbc) * (1.0 + 1e-12):
+        return np.zeros((0, 3))
+    reach = np.ceil(r_max / pbc.perpendicular_widths() + 0.5).astype(int)
+    grid = np.mgrid[-reach[0]:reach[0] + 1, -reach[1]:reach[1] + 1,
+                    -reach[2]:reach[2] + 1].reshape(3, -1).T.astype(float)
+    return grid[np.any(grid != 0, axis=1)]
+
+
 def compute_rdf(
     mol: Molecule,
     type1: str,
@@ -30,7 +50,8 @@ def compute_rdf(
         type1: Element symbol for first atom type.
         type2: Element symbol for second atom type.
         n_bins: Number of histogram bins.
-        r_max: Maximum distance (default: half the shortest cell dimension).
+        r_max: Maximum distance (default: half the smallest cell width). Beyond that
+            the pairs are summed over periodic images.
         progress_callback: Optional callable(frac: float).
         name1, name2: Optional atom names (e.g. "OW") narrowing each type.
 
@@ -43,7 +64,7 @@ def compute_rdf(
 
     pbc = mol.pbc
     if r_max is None:
-        r_max = min(pbc.a, pbc.b, pbc.c) / 2.0
+        r_max = half_cell_width(pbc)
 
     idx1 = _select(mol, type1, name1)
     idx2 = _select(mol, type2, name2)
@@ -60,6 +81,8 @@ def compute_rdf(
     targets = coords[idx2]
     # rows of the i x j distance matrix per block, keeping a block near 2M pairs
     block = max(1, 2_000_000 // len(idx2))
+    # beyond half the cell width one image per pair is not enough
+    shifts = image_shifts(pbc, r_max) @ pbc.basis_matrix
 
     for b0 in range(0, total, block):
         rows = np.arange(b0, min(b0 + block, total))
@@ -75,6 +98,13 @@ def compute_rdf(
         bins = (d / dr).astype(int)
         valid = (bins >= 0) & (bins < n_bins) & (d < r_max)
         hist += np.bincount(bins[valid], minlength=n_bins)[:n_bins]
+        for shift in shifts:
+            # further images of every atom, its own included. For one type with itself
+            # (i, j, +L) and (j, i, -L) are the same pair, so each counts a half.
+            d = np.linalg.norm(wrapped + shift, axis=2).ravel()
+            d = d[d < r_max]
+            hist += np.bincount((d / dr).astype(int), minlength=n_bins)[:n_bins] * (
+                0.5 if same_type else 1.0)
 
         if progress_callback:
             progress_callback(rows[-1] / total)

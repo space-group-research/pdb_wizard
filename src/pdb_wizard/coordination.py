@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from pdb_wizard.molecule import Molecule
+from pdb_wizard.rdf import image_shifts
 
 
 def compute_coordination(
@@ -61,6 +62,8 @@ def compute_coordination(
     histogram = np.zeros(n_bins)
 
     use_pbc = mol.pbc is not None
+    # beyond half the cell width one image per pair is not enough
+    shifts = image_shifts(mol.pbc, r_max) @ mol.pbc.basis_matrix if use_pbc else ()
 
     for ci in range(len(center_pos)):
         diffs = neighbor_pos - center_pos[ci]
@@ -70,11 +73,15 @@ def compute_coordination(
             frac -= np.round(frac)
             diffs = frac @ mol.pbc.basis_matrix
         dists = np.sqrt(np.sum(diffs ** 2, axis=1))
+        if len(shifts):
+            dists = np.concatenate([dists] + [np.sqrt(np.sum((diffs + shift) ** 2, axis=1))
+                                              for shift in shifts])
         # Exclude self (distance ~0) and clamp to r_max
         mask = (dists > 0.1) & (dists < r_max)
         if not mask.any():
             continue
-        bins = np.minimum((dists[mask] / dr).astype(int), n_bins - 1)
+        # entry i of the running sum is the number closer than r_values[i]
+        bins = np.minimum((dists[mask] / dr).astype(int) + 1, n_bins - 1)
         histogram += np.bincount(bins, minlength=n_bins)[:n_bins]
 
     # Average per center atom
