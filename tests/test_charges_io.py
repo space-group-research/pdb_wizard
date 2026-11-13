@@ -149,3 +149,34 @@ async def test_resp_round_trips_through_modal_and_applies_charges():
 
         applied = [a.charge for a in app.molecule.atoms]
         assert applied == pytest.approx(EXPECTED_RESP)
+
+
+# CP2K's RESP_CHARGES_TO_FILE layout with a kind column and a short Total line.
+CP2K_RESP = """ RESP charges:
+  Type |   Atom |    Charge
+
+  RESP       1  Cu    1.064519
+  RESP       2  O    -0.582110
+  RESP       3  O    -0.482409
+ Total                 0.000000
+"""
+
+
+def test_resp_is_recognised_by_content_whatever_the_file_is_called(tmp_path):
+    """Students rename these files; the header, not the extension, says what it is."""
+    for name in ("charges.txt", "HKUST-RESP_CHARGES.resp", "resp_charges"):
+        path = tmp_path / name
+        path.write_text(CP2K_RESP)
+        assert read_charges_file(str(path)) == [1.064519, -0.582110, -0.482409], name
+    renamed = tmp_path / "dimer.dat"
+    renamed.write_text(RESP_FILE.read_text())
+    assert read_charges_file(str(renamed)) == EXPECTED_RESP
+
+
+def test_plain_column_files_are_still_read_as_plain_columns(tmp_path):
+    path = tmp_path / "q.txt"
+    path.write_text("0.5\n-0.25\n-0.25\n")
+    assert read_charges_file(str(path)) == [0.5, -0.25, -0.25]
+    labelled = tmp_path / "labelled.txt"
+    labelled.write_text("Cu 0.5\nO -0.5\n")
+    assert read_charges_file(str(labelled)) == [0.5, -0.5]

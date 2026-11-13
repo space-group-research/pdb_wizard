@@ -1709,6 +1709,13 @@ def parse_resp_charges(lines: list[str]) -> list[float]:
     return charges
 
 
+def _looks_like_resp(lines: list[str]) -> bool:
+    """A CP2K RESP charge file whatever it is called: a 'RESP charges' title, or atom lines
+    that begin with the word RESP."""
+    head = [ln.strip().lower() for ln in lines[:6] if ln.strip()]
+    return any(ln.startswith("resp") for ln in head)
+
+
 def read_charges_file(
     path: str, skip_first: int = 0, skip_last: int = 0,
 ) -> list[float]:
@@ -1722,7 +1729,7 @@ def read_charges_file(
     """
     with open(path) as f:
         lines = f.readlines()
-    if path.lower().endswith(".resp"):
+    if path.lower().endswith(".resp") or _looks_like_resp(lines):
         return parse_resp_charges(lines)
     end = max(0, len(lines) - skip_last)
     used = lines[skip_first:end]
