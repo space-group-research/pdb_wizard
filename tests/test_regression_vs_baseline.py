@@ -336,6 +336,9 @@ def test_mpmc_export_is_unchanged_for_frameworks(bw, structure):
             if ln.startswith("ATOM") and " BOX " not in ln and ln.split()[4] == flag
         )
 
+    if rows(old, "M"):  # a baseline from after that fix: nothing may differ
+        assert new == old
+        return
     moved = [a for a in p.atoms if a.mpmc_flag == "M"]
     assert len(rows(new, "M")) == len(moved) > 0
     assert set(rows(new, "F")) <= set(rows(old, "F"))

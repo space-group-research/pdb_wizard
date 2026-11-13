@@ -2810,6 +2810,7 @@ class MoleculeView(Widget):
         self._cached_strips: list[Strip] = []
         self._cached_size: tuple[int, int] = (0, 0)
         self._dragging = False
+        self._drag_moved = False
         self._drag_start_x = 0
         self._drag_start_y = 0
         self._locked_centroid = None
@@ -2874,8 +2875,14 @@ class MoleculeView(Widget):
         self.capture_mouse()
 
     def on_mouse_up(self, event) -> None:
+        # A release can arrive without a press on this widget: the button went down on
+        # another widget or before the app was ready, or the terminal was left reporting
+        # the mouse by an earlier program. That is not a click here, so it is ignored.
+        if not self._dragging:
+            return
         was_drag = self._drag_moved
         self._dragging = False
+        self._drag_moved = False
         self.release_mouse()
         if not was_drag and self.measure_mode:
             # Only pick atoms in measure mode
