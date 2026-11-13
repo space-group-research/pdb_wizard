@@ -67,11 +67,11 @@ from pdb_wizard.gui_tools import (
     InputGeneratorDialog,
     ReduceCellDialog,
     TextReport,
+    _gui_real_cell,
 )
 from pdb_wizard.io import (
     _is_mpmc_dummy_site,
     assign_framework_charges,
-    is_fallback_cell,
     mpmc_movable_count,
     next_mpmc_mol_id,
     read_charges_file,
@@ -124,6 +124,7 @@ _WRITERS = {
     ".data": write_lammps_data,
     ".d12": write_crystal_d12,  # P1; MainWindow.save_crystal writes a symmetry-reduced one
 }
+_CELL_FORMATS = (".pqr", ".cif", ".vasp", ".poscar", ".d12")  # cannot be written without a cell
 _SAVE_FILTER = ("MPMC (*.pqr);;PDB (*.pdb);;XYZ (*.xyz);;CIF (*.cif);;"
                 "POSCAR (*.vasp *.poscar);;LAMMPS data (*.lmp *.data);;CRYSTAL23 input (*.d12)")
 _OPEN_FILTER = ("Structures (*.pdb *.pqr *.ent *.cif *.xyz *.vasp *.poscar POSCAR CONTCAR "
@@ -163,7 +164,7 @@ Keys (click the 3D view first)
   O                    orthographic / perspective
   m                    measure mode: click two atoms to pin their distance
 
-Trajectories
+Trajectories (click the 3D view or the frame bar first)
   [ / ]                previous / next frame
   Home / End           first / last frame
   Space                play / pause
@@ -333,8 +334,7 @@ class StructureView(_QWidget):
     def has_cell(self) -> bool:
         """A real cell to draw. Trajectories without one get a 10^6 Å stand-in box from
         the reader; drawing or fitting the view to that would shrink the atoms to a dot."""
-        return (self.mol is not None and self.mol.pbc is not None
-                and not is_fallback_cell(self.mol.pbc))
+        return _gui_real_cell(self.mol)
 
     def cell_corners(self) -> np.ndarray:
         """Cell corners around the atoms: the box is placed in whichever periodic image
@@ -457,6 +457,8 @@ class StructureView(_QWidget):
         """Index of the front-most atom drawn under the point, or None."""
         if not len(self._screen):
             return None
+        if self.mol is None or len(self._screen) != len(self.mol.atoms):
+            return None  # the atoms changed since the last paint
         d = np.hypot(self._screen[:, 0] - x, self._screen[:, 1] - y)
         hit = np.where((d <= np.maximum(self._radii_px, 3.0)) & self._visible)[0]
         if not len(hit):
@@ -1415,8 +1417,12 @@ class MainWindow(_QMainWindow):
                            ("Home", lambda: self.frame_bar.go(0)),
                            ("End", lambda: self.frame_bar.go(self.frame_bar.n - 1)),
                            ("Space", self.frame_bar.toggle_play)):
-            sc = QtGui.QShortcut(QtGui.QKeySequence(keys), self)
-            sc.activated.connect(slot)
+            # for the 3D view and the frame bar only: window-wide they would take Space,
+            # Home and End away from the buttons, check boxes and tables in the docks
+            for owner in (self.view, self.frame_bar):
+                sc = QtGui.QShortcut(QtGui.QKeySequence(keys), owner)
+                sc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+                sc.activated.connect(slot)
 
     # ---- documents ----------------------------------------------------------------------
 
@@ -1474,7 +1480,7 @@ class MainWindow(_QMainWindow):
     def close_tab(self, index: int) -> None:
         if not 0 <= index < len(self.docs):
             return
-        self.frame_bar.stop(notify=False)
+        self.frame_bar.stop(notify=index != self.doc_index)  # the shown tab stays: refresh it
         self._close_windows_of(self.docs[index])
         if len(self.docs) == 1:
             self.docs[0] = GuiDocument()
@@ -1530,12 +1536,21 @@ class MainWindow(_QMainWindow):
     def _checkpoint(self) -> None:
         # remember which frame was edited: undo must restore that frame, not the shown one
         self._undo.append((self.doc.frame_idx, copy.deepcopy(self.mol)))
+        dropped = self._undo[:-20]
         del self._undo[:-20]
-        # a new edit ends the redo history; it is kept aside until the edit is known to
-        # change something, since an edit that finds nothing to do calls _discard_checkpoint
-        self._redo_stash = (self.doc, self._redo)
+        # a new edit ends the redo history; it is kept aside (with the undo steps the cap
+        # just dropped) until the edit is known to change something, since an edit that
+        # finds nothing to do calls _discard_checkpoint
+        self._redo_stash = (self.doc, self._redo, dropped)
         self._redo = []
         self._update_history_actions()
+
+    def _checkpoint_cells(self) -> None:
+        """_checkpoint for an edit of the cell, which a trajectory applies to every frame:
+        the undo step also holds each frame's cell, so one undo restores them all."""
+        self._checkpoint()
+        if self.frames:
+            self._undo[-1] += ([copy.deepcopy(f.pbc) for f in self.frames],)
 
     def _discard_checkpoint(self) -> None:
         if self._undo:
@@ -1543,19 +1558,28 @@ class MainWindow(_QMainWindow):
         stash, self._redo_stash = self._redo_stash, None
         if stash is not None and stash[0] is self.doc:
             self._redo = stash[1]
+            self._undo[:0] = stash[2]
         self._update_history_actions()
 
     def _step_history(self, source: list, target: list, message: str) -> None:
         """Undo (from the undo list onto the redo list) or redo (the other way round):
         show the saved state on the frame it was taken from, and keep the state it replaces
         in ``target`` so the step can be taken back."""
-        frame, mol = source.pop()
+        entry = source.pop()
+        frame, mol = entry[0], entry[1]
+        cells = entry[2] if len(entry) > 2 else None  # a cell edit: every frame's cell
         if self.frames and frame < len(self.frames):
             self.frame_bar.stop(notify=False)
             self.doc.frame_idx = frame
             self.frame_bar.set_count(len(self.frames), frame)
         frame = self.doc.frame_idx
-        target.append((frame, self.frames[frame] if self.frames else self.mol))
+        back = (frame, self.frames[frame] if self.frames else self.mol)
+        if cells is not None and self.frames and len(cells) == len(self.frames):
+            back += ([copy.deepcopy(f.pbc) for f in self.frames],)
+            for k, pbc in enumerate(cells):
+                if k != frame:  # that frame is replaced below by ``mol``, saved with its cell
+                    self.frames[k].pbc = copy.deepcopy(pbc)
+        target.append(back)
         del target[:-20]
         self._redo_stash = None
         self.set_molecule(mol, reset_view=False)
@@ -1575,8 +1599,10 @@ class MainWindow(_QMainWindow):
         if self.mol is None or not self.mol.atoms:
             self._warn(f"{what} needs a structure. Open one first.")
             return False
-        if cell and self.mol.pbc is None:
-            self._warn(f"{what} needs a unit cell (PBC). This structure has none — "
+        if cell and not _gui_real_cell(self.mol):
+            none = ("This structure has none" if self.mol.pbc is None else
+                    "This trajectory has none (its huge box is only a stand-in)")
+            self._warn(f"{what} needs a unit cell (PBC). {none} — "
                        "set one with Edit > Update unit cell first.")
             return False
         return True
@@ -1787,6 +1813,9 @@ class MainWindow(_QMainWindow):
         except Exception as e:  # any reader error goes to the user, not the console
             self._warn(f"Could not read {Path(path).name}:\n{e}")
             return False
+        if not mol.atoms:
+            self._warn(f"No atoms found in {Path(path).name}")
+            return False
         self.new_tab(mol, path)
         n = len(messages)
         note = (f" (deleted {n} overlapping atom{'s' if n != 1 else ''}, closer than "
@@ -1913,6 +1942,10 @@ class MainWindow(_QMainWindow):
         return True
 
     def save_path(self, path: str) -> bool:
+        if (Path(path).suffix.lower() in _CELL_FORMATS and self.mol is not None
+                and self.mol.pbc is not None and not _gui_real_cell(self.mol)):
+            # the writers refuse a structure without a cell; the stand-in box is not one
+            return self._need_structure(f"Saving {Path(path).name}", cell=True)
         try:
             save_structure(self.mol, path)
         except Exception as e:
@@ -1982,6 +2015,10 @@ class MainWindow(_QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.frame_bar.stop(notify=False)
+        if self.task is not None and not self.task.finished:
+            self.task.detach()  # its report must not pop up after the window has gone
+            self.task = None
+            QtWidgets.QApplication.restoreOverrideCursor()
         for d in self._live_windows():
             d.close()
         if self._db_cache and os.path.isdir(self._db_cache):
@@ -2108,8 +2145,9 @@ class MainWindow(_QMainWindow):
             if self.mol.pbc is None:
                 self.statusBar().showMessage("This system already has no PBC", 4000)
                 return False
-            self._checkpoint()
-            self.mol.pbc = None
+            self._checkpoint_cells()
+            for f in self.frames or [self.mol]:
+                f.pbc = None
             self._changed("PBC removed")
             return True
         a, b, c, alpha, beta, gamma = (float(v) for v in values)
@@ -2117,11 +2155,12 @@ class MainWindow(_QMainWindow):
         if problem:
             self._warn(problem)
             return False
-        self._checkpoint()
-        if self.mol.pbc is not None:
-            self.mol.pbc.update(a, b, c, alpha, beta, gamma)
-        else:
-            self.mol.pbc = PBC(a, b, c, alpha, beta, gamma)
+        self._checkpoint_cells()
+        for f in self.frames or [self.mol]:  # a trajectory: every frame, not just this one
+            if f.pbc is not None:
+                f.pbc.update(a, b, c, alpha, beta, gamma)
+            else:
+                f.pbc = PBC(a, b, c, alpha, beta, gamma)
         self._changed(f"Cell: {a:.3f} {b:.3f} {c:.3f} {alpha:.1f} {beta:.1f} {gamma:.1f}")
         return True
 
@@ -2309,16 +2348,23 @@ class MainWindow(_QMainWindow):
             dialog.run()
         return dialog
 
-    def _open_fetched(self, path: str, label: str, rid: str) -> None:
+    def _open_fetched(self, path: str, label: str, rid: str) -> bool:
+        """Open a downloaded file in a tab. False (after a warning) if it is not a structure."""
         messages: list = []
         try:
             mol = read_file(path, True, messages.append)
         except Exception as e:  # a download that is not a readable structure
             self._warn(f"Could not read {label} {rid}:\n{e}")
-            return
-        self.new_tab(mol, path)
+            return False
+        if not mol.atoms:
+            self._warn(f"No atoms found in {label} {rid}")
+            return False
+        # no path: the download sits in a temp folder that is deleted when the window
+        # closes, so nothing (Save as, the input generator) may default to that folder
+        self.new_tab(mol, None, Path(path).name)
         self.statusBar().showMessage(f"Opened {label} {rid} ({len(mol.atoms)} atoms)", 6000)
         self._warn_load_notes(mol, f"{label} {rid}")
+        return True
 
     def energy_plot(self, path: Optional[str] = None):
         """MPMC energy.dat next to the structure, or one you pick."""
@@ -2329,7 +2375,11 @@ class MainWindow(_QMainWindow):
                                                             "Energy (*.dat *.csv);;All files (*)")
         if not path:
             return None
-        data = read_energy_dat(path)
+        try:
+            data = read_energy_dat(path)
+        except (OSError, ValueError) as e:  # a folder, not text, rows of unequal length
+            self._warn(f"Could not read {path}:\n{e}")
+            return None
         if not data:
             self._warn(f"Could not read {path}")
             return None
