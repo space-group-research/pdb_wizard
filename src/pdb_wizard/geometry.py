@@ -46,6 +46,41 @@ def find_overlapping_pairs(
     return pairs
 
 
+def _same_movable_molecule(a: Atom, b: Atom) -> bool:
+    return (a.mpmc_flag == "M" and b.mpmc_flag == "M" and a.mpmc_mol is not None
+            and a.mpmc_mol == b.mpmc_mol)
+
+
+def _pairs_within(mol: Molecule, cutoff: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(i, j, r) for minimum-image pairs i < j closer than ``cutoff``, in (i, j) order.
+
+    Evaluated in row chunks, so memory stays bounded where an all-pairs matrix would take
+    N^2 (gigabytes for a few thousand atoms).
+    """
+    pbc = mol.pbc
+    n = len(mol.atoms)
+    empty = (np.zeros(0, dtype=int), np.zeros(0, dtype=int), np.zeros(0))
+    if pbc is None or n < 2:
+        return empty
+    coords = np.array([a.x for a in mol.atoms], dtype=float)
+    recip, basis = pbc.reciprocal_basis_matrix, pbc.basis_matrix
+    chunk = max(1, _OVERLAP_CHUNK_BUDGET // n)
+    out_i, out_j, out_r = [], [], []
+    for start in range(0, n, chunk):
+        stop = min(start + chunk, n)
+        dx = coords[start:stop, None, :] - coords[None, :, :]
+        wrapped = dx - np.round(dx @ recip) @ basis
+        r = np.linalg.norm(wrapped, axis=2)
+        ii, jj = np.nonzero(r < cutoff)
+        keep = ii + start < jj
+        out_i.append(ii[keep] + start)
+        out_j.append(jj[keep])
+        out_r.append(r[ii[keep], jj[keep]])
+    if not out_i:
+        return empty
+    return np.concatenate(out_i), np.concatenate(out_j), np.concatenate(out_r)
+
+
 def remove_overlapping_atoms(
     mol: Molecule, cutoff: float = OVERLAP_CUTOFF,
 ) -> tuple[Molecule, list[str]]:
@@ -69,6 +104,8 @@ def remove_overlapping_atoms(
     for i, j in pairs:
         if i in removed or j in removed:
             continue
+        if _same_movable_molecule(system[i], system[j]):
+            continue  # sites of one sorbate model (BSS H2 sits 0.04 A apart) are not copies
         removed.add(j)
         a, b = system[i], system[j]
         messages.append(
@@ -93,12 +130,12 @@ def overlap_detector(mol: Molecule) -> Molecule:
 def get_close_contacts(mol: Molecule) -> list[str]:
     if mol.pbc is None:
         return []
-    pbc = mol.pbc
     system = mol.atoms
     set_atom_ids(system)
-    i_idx, j_idx, rs = pbc.get_all_rs_min_image(system)
     vdw_radii = np.array([a.vdw for a in system], dtype=float)
     bond_radii = np.array([a.bond_r for a in system], dtype=float)
+    # a contact is closer than the mean vdW radius, so nothing beyond the largest matters
+    i_idx, j_idx, rs = _pairs_within(mol, float(vdw_radii.max()) if len(system) else 0.0)
     mixed_vdw = 0.5 * (vdw_radii[i_idx] + vdw_radii[j_idx])
     mixed_bond = 0.5 * (bond_radii[i_idx] + bond_radii[j_idx])
     mask = (mixed_vdw > rs) & (rs > mixed_bond)
@@ -202,12 +239,11 @@ def get_angles_list(mol: Molecule) -> list[str]:
 def get_lone_atoms(mol: Molecule) -> list[Atom]:
     if mol.pbc is None:
         return []
-    pbc = mol.pbc
     system = mol.atoms
     set_atom_ids(system)
     n = len(system)
-    i_idx, j_idx, rs = pbc.get_all_rs_min_image(system)
     vdw_radii = np.array([a.vdw for a in system], dtype=float)
+    i_idx, j_idx, rs = _pairs_within(mol, float(vdw_radii.max()) if n else 0.0)
     mixed_vdw = 0.5 * (vdw_radii[i_idx] + vdw_radii[j_idx])
     has_neighbor = np.zeros(n, dtype=bool)
     contact_mask = rs < mixed_vdw
@@ -286,3 +322,61 @@ def edit_h_dist(mol: Molecule, second_element: str, distance: float) -> Molecule
     """Adjust X-H distances, returning only the molecule (see adjust_h_distances)."""
     mol, _ = adjust_h_distances(mol, second_element, distance)
     return mol
+
+
+# Metals that get coordination polyhedra in the viewers.
+POLYHEDRON_METALS = frozenset({
+    "Li", "Be", "Na", "Mg", "Al", "K", "Ca", "Sc", "Ti", "V",
+    "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Rb", "Sr",
+    "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
+    "Sn", "Cs", "Ba", "La", "Ce", "Hf", "Ta", "W", "Re", "Os",
+    "Ir", "Pt", "Au", "Pb", "Bi",
+})
+
+
+def water_atom_indices(mol: Molecule) -> set[int]:
+    """Indices of water molecules' atoms: an O bonded to exactly two H and nothing else.
+
+    Uses ``mol.bonds`` as they are (call ``detect_bonds`` first).
+    """
+    neighbors: dict[int, list[int]] = {}
+    for a, b in mol.bonds or []:
+        neighbors.setdefault(a, []).append(b)
+        neighbors.setdefault(b, []).append(a)
+    water: set[int] = set()
+    for i, atom in enumerate(mol.atoms):
+        if atom.element.symbol != "O":
+            continue
+        nbrs = neighbors.get(i, [])
+        h_nbrs = [j for j in nbrs if mol.atoms[j].element.symbol == "H"]
+        if len(h_nbrs) == 2 and len(nbrs) == 2:
+            water.add(i)
+            water.update(h_nbrs)
+    return water
+
+
+def coordination_polyhedra(atoms: list, pbc=None) -> list[tuple[int, np.ndarray]]:
+    """(metal index, neighbour positions) for each metal with three or more neighbours.
+
+    Neighbours are within 2.5 covalent radii + 0.5 Å of the metal and placed at their
+    minimum image around it, so a metal near a cell face gets a whole polyhedron.
+    """
+    if not atoms:
+        return []
+    positions = np.array([a.position for a in atoms])
+    out = []
+    for ci, atom in enumerate(atoms):
+        if atom.element.symbol not in POLYHEDRON_METALS:
+            continue
+        cutoff = atom.element.covalent_radius * 2.5 + 0.5
+        diff = positions - positions[ci]
+        if pbc is not None:
+            frac = diff @ pbc.reciprocal_basis_matrix
+            frac -= np.round(frac)
+            diff = frac @ pbc.basis_matrix
+        d = np.linalg.norm(diff, axis=1)
+        near = np.where(d < cutoff)[0]
+        near = near[near != ci]
+        if len(near) >= 3:
+            out.append((ci, positions[ci] + diff[near]))
+    return out

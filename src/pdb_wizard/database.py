@@ -321,3 +321,59 @@ BACKENDS: dict[str, dict] = {
         "fetch": lambda mid, output_dir=".": fetch_materials_project_cif(mid, "", output_dir),
     },
 }
+
+
+# Modes the "All databases" search accepts; the query goes to every backend with that mode.
+ALL_MODES = ("text", "formula")
+
+
+def modes_for(source: str) -> tuple:
+    if source == "all":
+        return ALL_MODES
+    return BACKENDS.get(source, {}).get("modes", ("text",))
+
+
+def placeholder_for(source: str, mode: str) -> str:
+    if source == "all":
+        if mode == "formula":
+            return "formula across all DBs (eg 'C9H8O4')"
+        return "free-text search across all DBs"
+    return BACKENDS.get(source, {}).get("placeholder", {}).get(mode, "query")
+
+
+def backends_for(source: str, mode: str) -> list:
+    if source == "all":
+        return [c for c, spec in BACKENDS.items() if mode in spec["modes"]]
+    return [source]
+
+
+def search_backends(source: str, mode: str, query: str) -> tuple:
+    """Search one backend or all of them (in parallel). Returns (results, status message).
+
+    A backend that fails is reported in the message; the others' results are kept.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    codes = backends_for(source, mode)
+    with ThreadPoolExecutor(max_workers=max(1, len(codes))) as pool:
+        futures = {c: pool.submit(BACKENDS[c]["search"], query, mode) for c in codes}
+    results: list = []
+    counts: dict = {}
+    errors: list = []
+    for code in codes:
+        try:
+            out = futures[code].result()
+        except Exception as e:  # network or parse failure of one backend
+            errors.append(f"{BACKENDS[code]['label']} ({type(e).__name__})")
+            counts[code] = 0
+            continue
+        results.extend(out)
+        counts[code] = len(out)
+    results.sort(key=lambda r: (r.get("source", ""), r.get("id", "")))
+    if source == "all" and len(codes) > 1:
+        breakdown = ", ".join(f"{BACKENDS[c]['label']}={counts.get(c, 0)}" for c in codes)
+        msg = f"{len(results)} results  ({breakdown})"
+    else:
+        msg = f"{len(results)} results in {BACKENDS[codes[0]]['label']}" if codes else "0 results"
+    if errors:
+        msg += f"  •  errors: {', '.join(errors)}"
+    return results, msg

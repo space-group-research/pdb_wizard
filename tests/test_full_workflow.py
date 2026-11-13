@@ -310,7 +310,7 @@ async def test_full_workflow_hkust1_extend_and_new_tab():
 
         # ----- Phase 2: extend a-axis 2× via the production code path -----
         # _do_extend mirrors what ExtendAxisModal's callback does.
-        app._do_extend((2, 1, 1))
+        app._do_extend((1, 0, 0))  # one extra copy along a, like the classic menu
         # _do_extend kicks off a background task; wait for it to finish
         for _ in range(100):
             await asyncio.sleep(0.05)

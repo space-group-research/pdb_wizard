@@ -143,7 +143,27 @@ class TestCP2KGenerator:
         assert "A   20.000000 0.000000 0.000000" in text
         assert "B   0.000000 20.000000 0.000000" in text
         assert "C   0.000000 0.000000 20.000000" in text
-        assert "ALPHA_BETA_GAMMA 90.0000 90.0000 90.0000" in text
+        # angles are only read with ABC; the vectors above already define the cell
+        assert "ALPHA_BETA_GAMMA" not in text
+
+    def test_non_orthogonal_cell_vectors(self, tmp_path):
+        """A hexagonal cell (gamma = 120) used to be written as a rectangular box: CP2K
+        ignores ALPHA_BETA_GAMMA unless ABC is given."""
+        import numpy as np
+
+        from pdb_wizard.io import read_file
+        mol = read_file(str(Path(__file__).resolve().parent.parent / "Ni-MOF-74.pqr"))
+        generate_cp2k_input(mol, tmp_path, mode="dft_md")
+        rows = {}
+        for line in (tmp_path / "input.inp").read_text().splitlines():
+            parts = line.split()
+            if parts and parts[0] in ("A", "B", "C") and len(parts) == 4:
+                rows[parts[0]] = [float(v) for v in parts[1:]]
+        h = np.array([rows["A"], rows["B"], rows["C"]])
+        np.testing.assert_allclose(h, mol.pbc.basis_matrix, atol=1e-5)
+        lengths = np.linalg.norm(h, axis=1)
+        gamma = np.degrees(np.arccos(h[0] @ h[1] / (lengths[0] * lengths[1])))
+        assert gamma == pytest.approx(mol.pbc.gamma, abs=1e-3) and abs(gamma - 120) < 0.01
 
     def test_kind_block_per_element(self, tmp_path):
         """Each unique element must get a &KIND ... &END KIND block."""

@@ -177,4 +177,4 @@ class TestTextualFallback:
         combined = result.stdout + result.stderr
         assert "falling back to the classic text menu" in combined
         assert "NameError" not in combined
-        assert "Mercury" in combined  # run_classic's .cif rejection
+        assert "Could not read fake.cif" in combined  # run_classic reached

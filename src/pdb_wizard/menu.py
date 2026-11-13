@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 
+from pdb_wizard.checks import load_notes, lone_atom_warning
 from pdb_wizard.constants import get_element
 from pdb_wizard.forcefields import (
     apply_ff_to_system_report,
@@ -21,9 +22,13 @@ from pdb_wizard.geometry import (
     remove_lone_atoms,
 )
 from pdb_wizard.io import (
+    assign_framework_charges,
     check_pdb_trajectory,
     check_xyz_trajectory,
+    detect_filetype,
+    next_mpmc_mol_id,
     read_charges_file,
+    read_file,
     read_pdb,
     read_pdb_trajectory,
     read_xyz,
@@ -31,6 +36,20 @@ from pdb_wizard.io import (
     write_mpmc_pdb,
     write_standard_pdb,
     write_xyz,
+)
+from pdb_wizard.menu_tools import (
+    CmHistory,
+    cm_dihedrals_list,
+    cm_menu_analysis,
+    cm_menu_database,
+    cm_menu_edit,
+    cm_menu_inputs,
+    cm_menu_isotherm,
+    cm_menu_measure,
+    cm_menu_write_other,
+    cm_place_sorbates,
+    cm_prompt_sorbate_count,
+    cm_prompt_sorbate_model,
 )
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.operations import (
@@ -40,6 +59,8 @@ from pdb_wizard.operations import (
     wrap_atoms,
 )
 from pdb_wizard.pbc import PBC
+from pdb_wizard.sorbates import format_inserted_sorbates
+from pdb_wizard.trajectory import read_trajectory
 
 
 def _list_coords(mol: Molecule) -> None:
@@ -156,15 +177,9 @@ def _write_mpmc_options(mol: Molecule) -> None:
             )
             try:
                 charges = read_charges_file(charges_filename)
-                n = len(mol.atoms)
-                if len(charges) == n:
-                    for ind, atom in enumerate(mol.atoms):
-                        atom.charge = charges[ind]
-                elif n % len(charges) == 0:
-                    for ind, atom in enumerate(mol.atoms):
-                        atom.charge = charges[ind % len(charges)]
-                else:
-                    raise ValueError
+                problem = assign_framework_charges(mol, charges)
+                if problem:
+                    raise ValueError(problem)
                 break
             except (TypeError, ValueError, FileNotFoundError) as e:
                 print(f"!!! Error reading charges: {e} !!!")
@@ -225,7 +240,9 @@ def _menu_geom_analysis(mol: Molecule) -> Molecule:
                 "6 = list coordinates\n"
                 "7 = edit hydrogen bond distances\n"
                 "8 = preview with VMD\n"
-                "9 = back to main menu\n\n> "
+                "9 = back to main menu\n"
+                "10 = list dihedrals\n"
+                "11 = measure a distance, angle or dihedral\n\n> "
             ))
         except ValueError:
             print("!!! Error converting input to int !!!")
@@ -250,7 +267,10 @@ def _menu_geom_analysis(mol: Molecule) -> Molecule:
                 for atom in lone:
                     print(f"{atom.element.symbol:>3} {atom.id:>5} {atom.x}")
         elif option == 5:
+            caution = lone_atom_warning(mol)
             mol, deleted = remove_lone_atoms(mol)
+            if deleted and caution:
+                print(f"\n!!! Warning: {caution} (main menu 17 undoes this) !!!")
             if not deleted:
                 print("\nNo lone atoms found\n")
             else:
@@ -284,11 +304,47 @@ def _menu_geom_analysis(mol: Molecule) -> Molecule:
             _vmd_preview(mol)
         elif option == 9:
             return mol
+        elif option == 10:
+            print("\nDihedrals:\n")
+            for msg in cm_dihedrals_list(mol):
+                print(msg)
+        elif option == 11:
+            cm_menu_measure(mol)
     return mol
 
 
-def _main_loop_single(mol: Molecule, filename: str) -> None:
+_NEW_OPTIONS = (
+    "11 = analysis{scope}\n"
+    "12 = edit structure{one}\n"
+    "13 = write other formats and pictures{one}\n"
+    "14 = generate simulation inputs{one}\n"
+    "15 = isotherm results\n"
+    "16 = fetch a structure from a database\n"
+    "17 = undo the last change\n"
+    "18 = open another file\n\n> "
+)
+
+
+def _prompt_open_file() -> str | None:
+    """A readable structure file to switch to, or None."""
+    path = input("\nfile to open (q to cancel) > ").strip()
+    if not path or path.lower() in ("q", "quit"):
+        return None
+    if not os.path.isfile(path):
+        print(f"!!! Error: {path} not found !!!")
+        return None
+    try:
+        detect_filetype(path)
+    except ValueError as e:
+        print(f"!!! Error: {e} !!!")
+        return None
+    return path
+
+
+def _main_loop_single(mol: Molecule, filename: str) -> str | None:
+    """The single-structure menu. Returns a file to open next, or None to quit."""
     mol = overlap_detector(mol)
+    history = CmHistory()
 
     while True:
         print_info(mol, filename)
@@ -303,11 +359,15 @@ def _main_loop_single(mol: Molecule, filename: str) -> None:
                 "6 = write .xyz\n"
                 "7 = write MPMC .pdb\n"
                 "8 = write standardized .pdb\n"
-                "9 = quit\n\n> "
+                "9 = quit\n"
+                "10 = insert sorbates and write MPMC .pdb\n"
+                + _NEW_OPTIONS.format(scope="", one="")
             ))
         except ValueError:
             print("!!! Error converting input to int !!!")
             continue
+        if option in (1, 2, 3, 4, 5, 12):
+            history.before(mol)
         if option == 1:
             mol = _menu_geom_analysis(mol)
         elif option == 2:
@@ -335,12 +395,62 @@ def _main_loop_single(mol: Molecule, filename: str) -> None:
                 write_standard_pdb(mol, out)
             print(f"wrote {out_filename}")
         elif option == 9:
-            break
+            return None
+        elif option == 10:
+            _menu_insert_sorbates(mol)
+        elif option == 11:
+            cm_menu_analysis(mol, None, filename)
+        elif option == 12:
+            mol = cm_menu_edit(mol)
+        elif option == 13:
+            cm_menu_write_other(mol, filename)
+        elif option == 14:
+            cm_menu_inputs(mol, filename)
+        elif option == 15:
+            cm_menu_isotherm()
+        elif option == 16:
+            path = cm_menu_database()
+            if path:
+                return path
+        elif option == 17:
+            previous = history.undo()
+            if previous is None:
+                print("\nNothing to undo")
+            else:
+                mol = previous
+                print("\nUndid the last change")
+        elif option == 18:
+            path = _prompt_open_file()
+            if path:
+                return path
         else:
             print("\nInvalid option!")
+        if option in (1, 2, 3, 4, 5, 12):
+            history.after(mol)
 
 
-def _main_loop_movie(molecules: list[Molecule], filename: str) -> None:
+def _menu_insert_sorbates(mol: Molecule) -> None:
+    """Classic-menu flow: pick a model, pack N copies (or fill), write MPMC .pdb."""
+    if mol.pbc is None:
+        print("\n!!! Inserting sorbates needs a unit cell (update cell dimensions first) !!!")
+        return
+    model = cm_prompt_sorbate_model()
+    if model is None:
+        return
+    n = cm_prompt_sorbate_count()
+    placed = cm_place_sorbates(mol, model, n)
+    if not placed:
+        return
+    lines = format_inserted_sorbates(model, placed, start_atom_id=len(mol.atoms) + 1,
+                                     start_mol_id=next_mpmc_mol_id(mol))
+    filename = input("\noutput filename > ")
+    write_mpmc_pdb(mol, filename, sorbate_lines=lines)
+    print(f"\nwrote {filename}\n")
+
+
+def _main_loop_movie(molecules: list[Molecule], filename: str) -> str | None:
+    """The trajectory menu. Returns a file to open next, or None to quit."""
+    history = CmHistory(depth=3)
     while True:
         print_info_movie(len(molecules), filename)
         n = len(molecules)
@@ -355,11 +465,15 @@ def _main_loop_movie(molecules: list[Molecule], filename: str) -> None:
                 "6 = write .xyz (all frames)\n"
                 "7 = write MPMC .pdb (single frame)\n"
                 "8 = write standardized .pdb (all frames)\n"
-                "9 = quit\n\n> "
+                "9 = quit\n"
+                "10 = insert sorbates and write MPMC .pdb (single frame)\n"
+                + _NEW_OPTIONS.format(scope=" (whole trajectory)", one=" (single frame)")
             ))
         except ValueError:
             print("!!! Error converting input to int !!!")
             continue
+        if option in (1, 2, 3, 4, 5, 12):
+            history.before(molecules)
         if option == 1:
             idx = _prompt_frame(n)
             if idx is not None:
@@ -408,31 +522,93 @@ def _main_loop_movie(molecules: list[Molecule], filename: str) -> None:
                     write_standard_pdb(m, out)
             print(f"wrote {n} frames to {out_filename}")
         elif option == 9:
-            return
+            return None
+        elif option == 10:
+            idx = _prompt_frame(n)
+            if idx is not None:
+                _menu_insert_sorbates(molecules[idx])
+        elif option == 11:
+            cm_menu_analysis(molecules[0], molecules, filename)
+        elif option == 12:
+            idx = _prompt_frame(n)
+            if idx is not None:
+                molecules[idx] = cm_menu_edit(molecules[idx])
+        elif option == 13:
+            idx = _prompt_frame(n)
+            if idx is not None:
+                cm_menu_write_other(molecules[idx], filename)
+        elif option == 14:
+            idx = _prompt_frame(n)
+            if idx is not None:
+                cm_menu_inputs(molecules[idx], filename)
+        elif option == 15:
+            cm_menu_isotherm()
+        elif option == 16:
+            path = cm_menu_database()
+            if path:
+                return path
+        elif option == 17:
+            previous = history.undo()
+            if previous is None:
+                print("\nNothing to undo")
+            else:
+                molecules = previous
+                print("\nUndid the last change")
+        elif option == 18:
+            path = _prompt_open_file()
+            if path:
+                return path
         else:
             print("\nInvalid option!")
+        if option in (1, 2, 3, 4, 5, 12):
+            history.after(molecules)
 
 
 def run_classic(filename: str) -> None:
+    """Run the menu on ``filename``, then on any file the user opens from it."""
+    next_file: str | None = filename
+    while next_file:
+        next_file = _run_classic_file(next_file)
+
+
+def _run_classic_file(filename: str) -> str | None:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     is_trajectory = False
+    other_format = False
+    file_notes: list[str] = []
     if ext == "xyz":
         is_trajectory = check_xyz_trajectory(filename)
     elif ext in ("pdb", "ent", "pqr"):
         is_trajectory = check_pdb_trajectory(filename)
-    elif ext == "cif":
-        sys.exit("Use Mercury to save a .cif as a .xyz or .pdb first")
     else:
-        sys.exit("Unable to determine if input file is xyz or pdb (please rename)")
+        # Formats the original menu could not read (.cif, POSCAR, LAMMPS data, .dcd, ...)
+        try:
+            other_format = detect_filetype(filename) != "dcd"
+        except ValueError:
+            sys.exit("Unable to determine if input file is xyz or pdb (please rename)")
+        is_trajectory = not other_format
 
     if is_trajectory:
-        with open(filename) as f:
-            if ext == "xyz":
+        if ext == "xyz":
+            with open(filename) as f:
                 molecules, pbcs = read_xyz_trajectory(f)
-            else:
+        elif ext in ("pdb", "ent", "pqr"):
+            with open(filename) as f:
                 molecules, pbcs = read_pdb_trajectory(f)
-        _main_loop_movie(molecules, filename)
+        else:
+            molecules = read_trajectory(filename)
+        return _main_loop_movie(molecules, filename)
+
+    if other_format:
+        try:
+            loaded = read_file(filename, remove_overlaps=False)
+        except (OSError, ValueError) as e:
+            sys.exit(f"Could not read {filename}: {e}")
+        file_notes = load_notes(loaded)
+        for note in file_notes:
+            print(f"\n!!! Warning: {note} !!!\n")
+        system, pbc = loaded.atoms, loaded.pbc
     else:
         with open(filename) as f:
             if ext == "xyz":
@@ -440,21 +616,23 @@ def run_classic(filename: str) -> None:
             else:
                 system, pbc = read_pdb(f, filename)
 
-        if pbc is None:
-            while True:
-                try:
-                    print(f"Cell information not found in {filename}")
-                    a = float(input("a>     "))
-                    b = float(input("b>     "))
-                    c = float(input("c>     "))
-                    alpha = float(input("alpha> "))
-                    beta = float(input("beta>  "))
-                    gamma = float(input("gamma> "))
-                    break
-                except ValueError:
-                    print("!!! Error converting input to float !!!\n")
-            pbc = PBC(a, b, c, alpha, beta, gamma)
+    if pbc is None:
+        while True:
+            try:
+                print(f"Cell information not found in {filename}")
+                a = float(input("a>     "))
+                b = float(input("b>     "))
+                c = float(input("c>     "))
+                alpha = float(input("alpha> "))
+                beta = float(input("beta>  "))
+                gamma = float(input("gamma> "))
+                break
+            except ValueError:
+                print("!!! Error converting input to float !!!\n")
+        pbc = PBC(a, b, c, alpha, beta, gamma)
 
-        mol = Molecule(atoms=system, pbc=pbc)
-        mol.detect_bonds()
-        _main_loop_single(mol, filename)
+    mol = Molecule(atoms=system, pbc=pbc)
+    if file_notes:
+        mol.load_notes = file_notes  # so Check Structure repeats them
+    mol.detect_bonds()
+    return _main_loop_single(mol, filename)

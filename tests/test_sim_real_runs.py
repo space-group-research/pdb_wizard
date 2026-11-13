@@ -151,7 +151,10 @@ class TestOpenMMRealRun:
         last_coords = np.array([a.x for a in frames[-1].atoms])
         # At 300 K with 1 fs timestep × 200 steps the atoms should move
         # at least somewhere between 0.01 and 5 Å.
-        max_disp = float(np.linalg.norm(first_coords - last_coords, axis=1).max())
+        # Minimum image: an atom that crosses the box edge is wrapped back into the
+        # box in the DCD, which would otherwise look like a ~20 Å jump.
+        disp = np.array([mol.pbc.wrap(d) for d in last_coords - first_coords])
+        max_disp = float(np.linalg.norm(disp, axis=1).max())
         assert 0.01 < max_disp < 10.0, (
             f"trajectory looks frozen or exploded: max disp {max_disp:.4f} Å"
         )

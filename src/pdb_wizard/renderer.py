@@ -561,41 +561,17 @@ class ImageRenderer:
 
         # Draw coordination polyhedra around metal atoms
         if show_polyhedra and snap_atoms and transformed:
-            _metals = {
-                "Li", "Be", "Na", "Mg", "Al", "K", "Ca", "Sc", "Ti", "V",
-                "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Rb", "Sr",
-                "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
-                "Sn", "Cs", "Ba", "La", "Ce", "Hf", "Ta", "W", "Re", "Os",
-                "Ir", "Pt", "Au", "Pb", "Bi",
-            }
-            for ci, atom in enumerate(snap_atoms):
-                if atom.element.symbol not in _metals:
-                    continue
-                cutoff = atom.element.covalent_radius * 2.5 + 0.5
-                center_pos = atom.position
-                # Collect neighbours at their minimum-image positions so a metal
-                # near a face gets a coherent polyhedron instead of edges
-                # streaking across the cell to the atoms' real coordinates.
+            from pdb_wizard.geometry import coordination_polyhedra
+            for ci, nbr_world in coordination_polyhedra(snap_atoms, pbc):
                 nbr_view = []
-                for ni, natom in enumerate(snap_atoms):
-                    if ni == ci:
-                        continue
-                    diff = natom.position - center_pos
-                    if pbc is not None:
-                        frac = diff @ pbc.reciprocal_basis_matrix
-                        frac -= np.round(frac)
-                        diff = frac @ pbc.basis_matrix
-                    d = float(np.linalg.norm(diff))
-                    if d < cutoff:
-                        pt = rot @ (center_pos + diff - centroid)
-                        pt[0] += pan[0]
-                        pt[1] += pan[1]
-                        pt[2] += camera_distance
-                        nbr_view.append(pt)
-                if len(nbr_view) < 3:
-                    continue
+                for p in nbr_world:
+                    pt = rot @ (p - centroid)
+                    pt[0] += pan[0]
+                    pt[1] += pan[1]
+                    pt[2] += camera_distance
+                    nbr_view.append(pt)
                 # Draw edges between all neighboring atoms (polyhedron wireframe)
-                color = atom.element.cpk_color
+                color = snap_atoms[ci].element.cpk_color
                 dim = (color[0] // 2, color[1] // 2, color[2] // 2)
                 for ai in range(len(nbr_view)):
                     for bj in range(ai + 1, len(nbr_view)):

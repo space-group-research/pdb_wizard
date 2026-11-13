@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pdb_wizard.sorbates import SORBATE_MODELS
+
 TEMPLATES_DIR = Path(__file__).parent
 
 _PLACEHOLDER = re.compile(r"\{\{\{(\w+)\}\}\}")
@@ -125,7 +127,7 @@ ENGINES: dict[str, EngineSpec] = {
         multi_run_var="pressures",
         user_vars=[
             VarSpec("sorbate", "Sorbate model", "select", "h2_bss",
-                    choices=("h2_bss", "ch4_trappe", "n2_ttm", "co2_epm2")),
+                    choices=tuple(SORBATE_MODELS)),  # every built-in model
             VarSpec("temperature", "Temperature (K)", "float", 77.0,
                     min_val=1.0, max_val=2000.0),
             VarSpec("pressures", "Pressures (atm, comma-sep)", "csv_floats",

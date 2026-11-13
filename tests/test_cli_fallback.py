@@ -99,7 +99,7 @@ def test_subprocess_fallback_with_textual_blocked(tmp_path):
         "PYTHONPATH": f"{blocker}{':'}{src}",
         "PATH": "/usr/bin:/bin",
     }
-    # .cif is rejected by run_classic immediately (sys.exit before any input
+    # a missing .cif makes run_classic exit at once (sys.exit before any input
     # loop), giving a deterministic, non-hanging terminator that still proves
     # we reached the classic menu.
     result = subprocess.run(
@@ -115,5 +115,5 @@ def test_subprocess_fallback_with_textual_blocked(tmp_path):
     # Fell back rather than dying on the old path.
     assert "falling back to the classic text menu" in combined
     assert "Use --classic for the text menu without textual" not in combined
-    # And actually entered run_classic (its .cif rejection message).
-    assert "Mercury" in combined
+    # And actually entered run_classic (its could-not-read message).
+    assert "Could not read fake.cif" in combined

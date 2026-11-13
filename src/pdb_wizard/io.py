@@ -112,6 +112,71 @@ _MPMC_FILE_MARKERS = ("REMARK BOX BASIS",)
 _MPMC_FLAGS = ("F", "M", "A", "S", "T")  # frozen / movable / adiabatic / spectre / target
 
 
+def _is_mpmc_dummy_site(atom: Atom) -> bool:
+    """A massless model site from an MPMC file: water M/LP charge sites, H2
+    centers of mass (H2G), and so on. Shown as element X, but expected."""
+    return atom.file_mass is not None and atom.file_mass < 0.5
+
+
+_SITE_MASS_TOLERANCE = 0.02  # amu
+
+
+def site_element(atom: Atom):
+    """The chemical element an atom really is, or None for a massless model site.
+
+    Sites of MPMC sorbate models are named after the model, not the element ('COG' and
+    'COE' are the carbon and oxygens of CO2, 'CHE' a methane hydrogen), so ``atom.element``,
+    which is read from the name, can be wrong for them. Their mass column is reliable: it
+    is matched to the periodic table here. Framework atoms, atoms without an MPMC mass,
+    and united-atom sites whose mass is no single element's keep ``atom.element``."""
+    if atom.file_mass is None or atom.mpmc_flag != "M":
+        return atom.element  # framework atoms are named after their element
+    if atom.file_mass < 0.5:
+        return None
+    from pdb_wizard.constants import ELEMENTS
+    best = min((el for el in ELEMENTS.values() if el.atomic_number > 0),
+               key=lambda el: abs(el.mass - atom.file_mass))
+    if abs(best.mass - atom.file_mass) <= _SITE_MASS_TOLERANCE:
+        return best
+    return atom.element
+
+
+def _mpmc_mass(atom: Atom) -> float:
+    """Mass to write for a movable site: the file's own value when it came from
+    MPMC (dummy sites are massless). Framework atoms keep element masses."""
+    return atom.file_mass if atom.file_mass is not None else atom.mass
+
+
+def assign_framework_charges(mol: Molecule, charges: list[float]) -> str | None:
+    """Put a list of charges on the framework atoms, in order.
+
+    Movable (M) molecules read from an MPMC file keep their model charges, so
+    the charges file only has to cover the framework. A list that divides the
+    framework count is repeated (charges for one cell of a supercell). Returns
+    None on success or a message saying why nothing was assigned.
+    """
+    framework = [a for a in mol.atoms if a.mpmc_flag != "M"]
+    n = len(framework)
+    if not charges or n % len(charges) != 0:
+        return f"Charge count ({len(charges)}) doesn't match framework atom count ({n})"
+    for ind, atom in enumerate(framework):
+        atom.charge = charges[ind % len(charges)]
+    return None
+
+
+def mpmc_movable_count(mol: Molecule) -> int:
+    """Number of movable (M) molecules read from an MPMC file and still in ``mol``."""
+    return len({a.mpmc_mol for a in mol.atoms if a.mpmc_flag == "M"})
+
+
+def next_mpmc_mol_id(mol: Molecule) -> int:
+    """Molecule id for the next sorbate added to ``mol``: one past the highest movable id
+    (the framework is molecule 1). Counting molecules is not enough: supercells and
+    deletions leave gaps, and a reused id merges two sorbates into one MPMC molecule."""
+    ids = [a.mpmc_mol for a in mol.atoms if a.mpmc_flag == "M" and isinstance(a.mpmc_mol, int)]
+    return max(ids) + 1 if ids else 2
+
+
 def _file_is_mpmc(lines: list[str]) -> bool:
     for line in lines:
         if line.startswith(_MPMC_FILE_MARKERS):
@@ -134,6 +199,15 @@ def _parse_mpmc_atom(tokens: list[str]) -> Atom:
     """
     name = tokens[2]
     atom = Atom(float(tokens[6]), float(tokens[7]), float(tokens[8]), name)
+    if len(tokens) > 5 and tokens[4] in _MPMC_FLAGS:
+        atom.mpmc_flag = tokens[4]
+        atom.mpmc_res = tokens[3]
+        if tokens[5].isdigit():
+            atom.mpmc_mol = int(tokens[5])
+    try:
+        atom.file_mass = float(tokens[9])
+    except (ValueError, IndexError):
+        pass
     try:
         atom.charge = float(tokens[10])
     except (ValueError, IndexError):
@@ -313,7 +387,8 @@ def read_pdb(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
                 tokens = line.split()
                 if len(tokens) > 3 and tokens[3] == "BOX":
                     continue  # MPMC box corner, not an atom
-                unknown_names[atom.name] = unknown_names.get(atom.name, 0) + 1
+                if not _is_mpmc_dummy_site(atom):
+                    unknown_names[atom.name] = unknown_names.get(atom.name, 0) + 1
             system.append(atom)
             continue
         if line[0] == "R" and line[:6] == "REMARK":
@@ -635,15 +710,21 @@ def _frac_to_cart(frac_coords: np.ndarray, basis_matrix: np.ndarray) -> np.ndarr
     return frac_coords @ basis_matrix
 
 
-def read_cif(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC]]:
+def read_cif(file: TextIO, filename: str = "",
+             notes: Optional[list] = None) -> tuple[list[Atom], Optional[PBC]]:
     """Read a CIF file, returning atoms (in Cartesian) and PBC.
 
     Handles:
     - P1 CIF files with fractional coordinates (most common for MOFs)
     - CIF files with symmetry operations that need expansion
     - Both _atom_site_fract_x and _atom_site_Cartn_x
+
+    ``notes`` (a list) receives a sentence for each thing the reader could not honour: a
+    space group named without its symmetry operators (the atoms are then only the
+    asymmetric unit) and partially occupied or disordered sites (all kept as full atoms).
     """
     lines = file.readlines()
+    _sg_number = ""
 
     # --- Phase 1: Parse all key-value pairs and loops ---
     cell_params: dict[str, float] = {}
@@ -769,7 +850,9 @@ def read_cif(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
                     pass
 
             if tag in ("_symmetry_space_group_name_h-m", "_space_group_name_h-m_alt"):
-                _space_group = value.strip()  # noqa: F841
+                _space_group = value.strip().strip("'\"")
+            if tag in ("_symmetry_int_tables_number", "_space_group_it_number"):
+                _sg_number = value.strip()
 
         i += 1
 
@@ -798,6 +881,17 @@ def read_cif(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
         parsed_symops = [_parse_symop_full("x,y,z")]
 
     is_p1 = len(parsed_symops) == 1
+    if notes is not None and is_p1:
+        name = _space_group.replace(" ", "").replace("_", "").upper()
+        named_higher = bool(name) and name not in ("P1", "?", ".")
+        numbered_higher = _sg_number.isdigit() and int(_sg_number) > 1
+        if named_higher or numbered_higher:
+            which = _space_group if named_higher else f"number {_sg_number}"
+            notes.append(
+                f"The CIF names space group {which} but lists no symmetry operators, so it "
+                f"was read as P1: the atoms are only the asymmetric unit, not the full cell. "
+                f"Re-export it with symmetry operators, or as P1 with all atoms (Mercury, "
+                f"VESTA), before using it.")
 
     # --- Phase 4: Extract atom data ---
     if not atom_loop_tags or not atom_loop_rows:
@@ -865,6 +959,32 @@ def read_cif(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
 
     if not labels:
         return [], pbc
+
+    if notes is not None:
+        partial = 0
+        groups = set()
+        for row in atom_loop_rows:
+            idx = col.get("_atom_site_occupancy")
+            if idx is not None and idx < len(row):
+                try:
+                    if _strip_cif_uncertainty(row[idx]) < 0.999:
+                        partial += 1
+                except ValueError:
+                    pass
+            idx = col.get("_atom_site_disorder_group")
+            if idx is not None and idx < len(row) and row[idx] not in (".", "?", "0", ""):
+                groups.add(row[idx])
+        if partial or groups:
+            what = []
+            if partial:
+                what.append(f"{partial} site{'s' if partial != 1 else ''} with occupancy "
+                            f"below 1")
+            if groups:
+                what.append(f"{len(groups)} disorder group{'s' if len(groups) != 1 else ''}")
+            notes.append(
+                f"The CIF has {' and '.join(what)}. Every site was kept as a full atom, so "
+                f"alternative positions overlap and the composition is wrong. Remove the "
+                f"extra sites before using it.")
 
     # --- Phase 5: Apply symmetry and convert to Cartesian ---
     system: list[Atom] = []
@@ -1131,10 +1251,23 @@ def write_mpmc_pdb(
     # Work on a copy so we don't reorder the caller's molecule
     mol = copy.deepcopy(mol)
     pbc = mol.pbc
-    mol, _ = sort_system(mol)
+    # Movable (M) molecules read from an MPMC file stay movable; everything
+    # else is framework and gets sorted as before.
+    movable = [a for a in mol.atoms if a.mpmc_flag == "M"]
+    mol = Molecule(atoms=[a for a in mol.atoms if a.mpmc_flag != "M"], pbc=pbc)
+    if mol.atoms:
+        mol, _ = sort_system(mol)
+    groups: dict[object, list[Atom]] = {}
+    for a in movable:
+        groups.setdefault(a.mpmc_mol, []).append(a)
 
-    # Box molecule ID: 2 if no sorbate, 3 if sorbate present
-    box_mol_id = 3 if sorbate_lines else 2
+    # Box molecule ID: one past the last movable/sorbate molecule (2 if none).
+    # MPMC skips BOX records, but distinct IDs keep the file unambiguous.
+    box_mol_id = 2 + len(groups)
+    for sl in sorbate_lines or ():
+        tok = sl.split()
+        if len(tok) > 5 and tok[5].isdigit():
+            box_mol_id = max(box_mol_id, int(tok[5]) + 1)
 
     fh, close_fh = _resolve_out(filename)
     try:
@@ -1161,6 +1294,22 @@ def write_mpmc_pdb(
 
         next_atom_id = len(mol.atoms) + 1
 
+        # Movable molecules from the input file (molecules 2, 3, ...), each made
+        # whole again in case a wrap split it across a cell face.
+        for k, atoms in enumerate(groups.values()):
+            ref = atoms[0].x
+            for atom in atoms:
+                x = ref + pbc.wrap(atom.x - ref)
+                parts.append(
+                    f"ATOM {next_atom_id:>6} {atom.name:<4} {(atom.mpmc_res or 'MOL'):<3} M"
+                    f" {k + 2:>4}    "
+                    f"{x[0]:>10.6f} {x[1]:>10.6f} {x[2]:>10.6f}"
+                    f" {_mpmc_mass(atom):>9.5f} {atom.charge:>9.5f}"
+                    f" {atom.alpha:>9.5f} {atom.epsilon:>9.5f} {atom.sigma:>9.5f}"
+                    f" 0.0 0.0 {atom.c6:>10.5f} {atom.c8:>12.5f} {atom.c10:>14.5f}\n"
+                )
+                next_atom_id += 1
+
         # Sorbate atoms (molecule 2, movable) — before box
         if sorbate_lines:
             parts.extend(sl + "\n" for sl in sorbate_lines)
@@ -1175,7 +1324,9 @@ def write_mpmc_pdb(
             )
         parts.extend(f"CONECT {next_atom_id + i:>4} {next_atom_id + j:>4}\n"
                      for i, j in pbc.edges())
-        parts.extend(f"REMARK BOX BASIS[{r_idx}]  {row[0]:20.14f} {row[1]:20.14f} {row[2]:20.14f}\n"
+        # MPMC's read_pqr_box needs the "=": it checks that the 4th token is "=".
+        parts.extend(f"REMARK BOX BASIS[{r_idx}] = "
+                     f"{row[0]:20.14f} {row[1]:20.14f} {row[2]:20.14f}\n"
                      for r_idx, row in enumerate(pbc.basis_matrix))
         parts.append("END\n")
         fh.write("".join(parts))
@@ -1356,7 +1507,11 @@ def read_pdb_trajectory(file: TextIO, progress_callback=None) -> tuple[list[Mole
             if system:
                 molecules.append(Molecule(atoms=system, pbc=pbc))
                 pbcs.append(pbc)
-        frame_lines = []
+            frame_lines = []
+        else:
+            # A cell written before MODEL (CRYST1 per frame, or once at the top as VMD
+            # and MDAnalysis do) belongs to the frame that follows; don't drop it.
+            frame_lines = [ln for ln in frame_lines if ln.startswith(("CRYST1", "REMARK BOX"))]
         atoms_in_frame = 0
 
     for li, line in enumerate(all_lines):
@@ -1412,6 +1567,8 @@ def detect_filetype(filepath: str) -> str:
         return "mol2"
     if suffix == ".dcd":
         return "dcd"
+    if suffix == ".out":
+        return "crystal_out"
     raise ValueError(f"Unsupported file format: {suffix}")
 
 
@@ -1430,6 +1587,7 @@ def read_file(
     deletion is never silent. Pass ``remove_overlaps=False`` to keep every atom.
     """
     ft = detect_filetype(filepath)
+    load_notes: list[str] = []  # what the reader had to assume; kept on the Molecule
     if ft == "pdb":
         with open(filepath) as f:
             system, pbc = read_pdb(f, filepath)
@@ -1440,7 +1598,7 @@ def read_file(
         system, pbc = read_zmat(filepath)
     elif ft == "cif":
         with open(filepath) as f:
-            system, pbc = read_cif(f, filepath)
+            system, pbc = read_cif(f, filepath, load_notes)
     elif ft == "poscar":
         from pdb_wizard.formats import read_poscar
         with open(filepath) as f:
@@ -1465,6 +1623,10 @@ def read_file(
         from pdb_wizard.formats import read_mol2
         with open(filepath) as f:
             system, pbc = read_mol2(f)
+    elif ft == "crystal_out":
+        from pdb_wizard.crystal import read_crystal_output
+        with open(filepath, errors="replace") as f:
+            system, pbc = read_crystal_output(f)
     elif ft == "dcd":
         raise ValueError(
             "DCD files are trajectories; open them with read_file_trajectory "
@@ -1474,12 +1636,16 @@ def read_file(
         raise ValueError(f"Unknown filetype: {ft}")
 
     mol = Molecule(atoms=system, pbc=pbc)
+    if load_notes:
+        mol.load_notes = load_notes  # read by checks.load_notes and shown by the front ends
     if remove_overlaps:
         from pdb_wizard.geometry import remove_overlapping_atoms
         mol, messages = remove_overlapping_atoms(mol)
         report = on_message if on_message is not None else _log.warning
         for message in messages:
             report(message)
+    if load_notes:
+        mol.load_notes = load_notes
     mol.detect_bonds()
     return mol
 
@@ -1543,6 +1709,13 @@ def parse_resp_charges(lines: list[str]) -> list[float]:
     return charges
 
 
+def _looks_like_resp(lines: list[str]) -> bool:
+    """A CP2K RESP charge file whatever it is called: a 'RESP charges' title, or atom lines
+    that begin with the word RESP."""
+    head = [ln.strip().lower() for ln in lines[:6] if ln.strip()]
+    return any(ln.startswith("resp") for ln in head)
+
+
 def read_charges_file(
     path: str, skip_first: int = 0, skip_last: int = 0,
 ) -> list[float]:
@@ -1556,7 +1729,7 @@ def read_charges_file(
     """
     with open(path) as f:
         lines = f.readlines()
-    if path.lower().endswith(".resp"):
+    if path.lower().endswith(".resp") or _looks_like_resp(lines):
         return parse_resp_charges(lines)
     end = max(0, len(lines) - skip_last)
     used = lines[skip_first:end]

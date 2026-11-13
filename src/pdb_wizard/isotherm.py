@@ -8,16 +8,18 @@ template engine; this module supplies the per-pressure derived variables
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
 
-from pdb_wizard.io import write_mpmc_pdb
+from pdb_wizard.io import next_mpmc_mol_id, write_mpmc_pdb
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.sorbates import format_sorbate_pqr
 from pdb_wizard.templates import load_template, render
 
-# Default MPMC LJ cutoff in Å. The simulation needs min(a,b,c)/2 > this.
+# LJ cutoff (Å) the box is checked against. Minimum image needs half the
+# smallest perpendicular cell width to be at least this.
 _DEFAULT_LJ_CUTOFF = 10.0
 # A charge is "set" if |q| exceeds this — anything smaller is rounding noise.
 _CHARGE_NONZERO = 1e-9
@@ -28,10 +30,63 @@ _EPSILON_SET = 0.1
 _SORBATE_OVERLAP = 1.5
 
 
+# Polarization and PHAHST settings from the MPMC tutorials, which call them "generally
+# acceptable for most situations" (tutorials/02_bssp_h2_mof-5, 03_phahst_h2_hkust-1).
+_POLARIZATION_KEYWORDS = """polarization          on
+polar_damp_type       exponential
+polar_damp            2.1304
+polar_wolf            on
+polar_wolf_alpha      0.13
+polar_iterative       on
+polar_palmo           on
+polar_gs_ranked       on
+polar_gamma           1.03
+polar_max_iter        4"""
+_PHAHST_KEYWORDS = """disp_expansion        on
+extrapolate_disp_coeffs on
+damp_dispersion       on
+cavity_autoreject_repulsion 10000"""
+
+
+def _model_flags(mol: Molecule, sorbate_model=None) -> dict:
+    """What the framework and sorbate parameters need MPMC to switch on."""
+    from pdb_wizard.sorbates import SORBATE_MODELS
+    model = SORBATE_MODELS.get(sorbate_model) if isinstance(sorbate_model, str) else sorbate_model
+    sites = model.sites if model is not None else []
+    framework = [a for a in mol.atoms if a.mpmc_flag != "M"]
+    return {
+        "polar": any(a.alpha > 0 for a in mol.atoms) or any(s.polarizability > 0 for s in sites),
+        "phahst_framework": any(max(a.c6, a.c8, a.c10) > 0 for a in framework),
+        "phahst_sorbate": any(max(s.c6, s.c8, s.c10) > 0 for s in sites),
+        "lj_sorbate": bool(sites) and not any(max(s.c6, s.c8, s.c10) > 0 for s in sites),
+        "sorbate_charged": any(abs(s.charge) > _CHARGE_NONZERO for s in sites),
+        "sorbate_known": model is not None,
+    }
+
+
+def mpmc_model_keywords(mol: Molecule, sorbate_model=None) -> str:
+    """The mpmc.inp lines the PQR parameters need.
+
+    Without them MPMC ignores the polarizabilities and reads PHAHST beta/rho (columns
+    13-14) as Lennard-Jones epsilon/sigma. The cutoff is half the smallest perpendicular
+    cell width: the same as MPMC's default (half the shortest lattice vector) for an
+    orthogonal cell, and inside the minimum-image limit for a skewed one.
+    """
+    flags = _model_flags(mol, sorbate_model)
+    cutoff = float(mol.pbc.perpendicular_widths().min()) / 2.0
+    lines = [f"pbc_cutoff            {np.floor(cutoff * 1e4) / 1e4:.4f}"]
+    if flags["phahst_framework"] or flags["phahst_sorbate"]:
+        lines += ["", _PHAHST_KEYWORDS]
+    if flags["polar"]:
+        lines += ["", _POLARIZATION_KEYWORDS]
+    return "\n".join(lines)
+
+
 def validate_for_mpmc(
     mol: Molecule,
     sorbate_pos: tuple[float, float, float] | None = None,
     lj_cutoff: float = _DEFAULT_LJ_CUTOFF,
+    sorbate_model=None,
 ) -> tuple[list[str], list[str]]:
     """Inspect a molecule for common MPMC-input footguns.
 
@@ -45,9 +100,12 @@ def validate_for_mpmc(
 
     Warnings:
       - |net charge| > 1e-3 e (non-neutral box)
-      - min(a,b,c)/2 < lj_cutoff (box too small for default LJ cutoff)
+      - Half the smallest perpendicular width < lj_cutoff (cell too thin)
+      - MPMC's automatic cutoff exceeds the minimum-image limit (skewed cell)
       - Sorbate placement overlaps a framework atom (within 1.5 Å)
-      - Triclinic cell (α/β/γ deviates from 90° — abcbasis loses info)
+
+    Triclinic cells need no warning: 'abcbasis a b c α β γ' builds the same
+    basis (a along x, b in the xy plane) as PBC._compute_matrices.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -62,10 +120,13 @@ def validate_for_mpmc(
         errors.append("Molecule has no atoms.")
         return errors, warnings
 
-    # Charges
+    # Charges (an uncharged framework is fine with an uncharged sorbate, e.g. TraPPE CH4)
+    flags = _model_flags(mol, sorbate_model)
     charges = np.array([a.charge for a in mol.atoms])
     n_set = int((np.abs(charges) > _CHARGE_NONZERO).sum())
-    if n_set == 0:
+    if n_set == 0 and flags["sorbate_known"] and not flags["sorbate_charged"]:
+        pass
+    elif n_set == 0:
         errors.append(
             "All atom charges are zero. Apply a force field or "
             "Generate QEq Charges before planning the isotherm — otherwise "
@@ -95,24 +156,38 @@ def validate_for_mpmc(
             f"Some elements are likely missing from the chosen force field."
         )
 
-    # Box size vs LJ cutoff
-    pbc = mol.pbc
-    half_min = min(pbc.a, pbc.b, pbc.c) / 2.0
-    if half_min < lj_cutoff:
+    if flags["phahst_framework"] != flags["phahst_sorbate"] and flags["sorbate_known"]:
+        which = "framework" if flags["phahst_framework"] else "sorbate"
         warnings.append(
-            f"Smallest box half-length is {half_min:.2f} Å but MPMC's default "
-            f"LJ cutoff is {lj_cutoff:.1f} Å. Either build a supercell "
-            f"(Edit > Extend Axis) or reduce the cutoff in mpmc.inp."
+            f"Only the {which} has PHAHST (C6/C8/C10) parameters. MPMC's disp_expansion "
+            f"applies to every pair, so the other side's LJ epsilon/sigma would be read as "
+            f"exponential-repulsion beta/rho. Use PHAHST (or LJ) for both."
         )
 
-    # Triclinic cell
-    if (abs(pbc.alpha - 90.0) > 0.5
-            or abs(pbc.beta - 90.0) > 0.5
-            or abs(pbc.gamma - 90.0) > 0.5):
+    # Box size vs LJ cutoff. Minimum image is only exact up to half the
+    # smallest perpendicular width, which for a skewed cell is less than
+    # min(a, b, c) / 2.
+    pbc = mol.pbc
+    max_cutoff = float(pbc.perpendicular_widths().min()) / 2.0
+    if max_cutoff < lj_cutoff:
         warnings.append(
-            f"Cell is not orthorhombic (α={pbc.alpha:.2f}, β={pbc.beta:.2f}, "
-            f"γ={pbc.gamma:.2f}). 'abcbasis' in mpmc.inp loses skew "
-            f"information; use 'pbc_input' with the basis matrix instead."
+            f"Cell is too thin for a {lj_cutoff:.1f} Å cutoff: half the "
+            f"smallest perpendicular width is {max_cutoff:.2f} Å. Either build "
+            f"a supercell (Edit > Extend Axis) or set pbc_cutoff ≤ "
+            f"{max_cutoff:.2f} in mpmc.inp."
+        )
+
+    # Without pbc_cutoff, MPMC uses half the shortest lattice vector, which
+    # exceeds the minimum-image limit in any non-orthogonal cell. Only pairs
+    # in the shell between the two radii are affected, so stay quiet for
+    # mild skew (<5%); a hexagonal cell (γ = 120°) is ~15% over.
+    mpmc_auto = pbc.shortest_lattice_vector() / 2.0
+    if mpmc_auto > 1.05 * max_cutoff:
+        warnings.append(
+            f"Cell is skewed: MPMC's automatic cutoff ({mpmc_auto:.2f} Å, half "
+            f"the shortest lattice vector) is larger than the minimum-image "
+            f"limit ({max_cutoff:.2f} Å), so some pairs would be missed. Set "
+            f"pbc_cutoff ≤ {max_cutoff:.2f} in mpmc.inp."
         )
 
     # Sorbate placement overlap
@@ -195,7 +270,8 @@ def generate_isotherm(
         sx, sy, sz = sorbate_pos
 
     sorbate_lines = format_sorbate_pqr(
-        sorbate_model, sx, sy, sz, mol_id=2, start_atom_id=len(mol.atoms) + 1,
+        sorbate_model, sx, sy, sz, mol_id=next_mpmc_mol_id(mol),
+        start_atom_id=len(mol.atoms) + 1,
     )
 
     template = load_template("mpmc_uvt.inp")
@@ -229,6 +305,7 @@ def generate_isotherm(
             "move_factor": move_factor,
             "rot_factor": rot_factor,
             "pqr_input": "input.pqr",
+            "model_keywords": mpmc_model_keywords(mol, sorbate_model),
         })
         (p_dir / "mpmc.inp").write_text(rendered)
 
@@ -278,7 +355,7 @@ def parse_isotherm_results(base_dir: str) -> list[tuple[float, float]]:
             continue
 
         hist_file = p_dir / "histogram.dat"
-        if hist_file.exists():
+        if hist_file.exists() and not _is_opendx(hist_file):
             try:
                 lines = hist_file.read_text().strip().split("\n")
                 total_n = 0.0
@@ -314,3 +391,97 @@ def parse_isotherm_results(base_dir: str) -> list[tuple[float, float]]:
 
     results.sort(key=lambda x: x[0])
     return results
+
+
+def _is_opendx(path: Path) -> bool:
+    """MPMC's histogram.dat is an OpenDX density grid, not an N histogram."""
+    try:
+        with open(path, errors="replace") as f:
+            head = f.read(400)
+    except OSError:
+        return False
+    return "OpenDX" in head or "gridpositions" in head
+
+
+_LOG_NAMES = ("mpmc.log", "runlog", "run.log", "output.log")
+_LOG_VALUE = re.compile(r"OUTPUT:\s*(N|wt %|wt % \(ME\)|qst)\s*=\s*([-+0-9.eE]+)"
+                        r"(?:\s*\+-\s*([-+0-9.eE]+))?")
+_LOG_STEP = re.compile(r"Completed step\s+(\d+)/(\d+)")
+
+
+def read_mpmc_log(p_dir: Path) -> dict:
+    """MPMC's own final averages from the run log in a pressure folder.
+
+    Looks for mpmc.log (what run_all.sh writes), a few common names, then any *.log or
+    slurm-*.out. Returns {} when there is no log, else a dict with ``file``, ``finished``,
+    ``step``/``steps`` and, when printed, ``N``, ``wt``, ``wt_me`` (value, error) and
+    ``qst``.
+    """
+    candidates = [p_dir / name for name in _LOG_NAMES]
+    candidates += sorted(p_dir.glob("*.log")) + sorted(p_dir.glob("slurm-*.out"))
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if "OUTPUT:" not in text:
+            continue
+        out: dict = {"file": path.name, "finished": "simulation exiting successfully" in text}
+        keys = {"N": "N", "wt %": "wt", "wt % (ME)": "wt_me", "qst": "qst"}
+        for name, value, err in _LOG_VALUE.findall(text):  # the last block wins
+            try:
+                out[keys[name]] = (float(value), float(err) if err else None)
+            except ValueError:
+                continue
+        steps = _LOG_STEP.findall(text)
+        if steps:
+            out["step"], out["steps"] = int(steps[-1][0]), int(steps[-1][1])
+        return out
+    return {}
+
+
+def isotherm_log_table(base_dir: str) -> str:
+    """MPMC's own uptake, error bars, wt% and Qst for each pressure folder, as text, with a
+    line for every run that has not finished. '' when no folder has a log."""
+    base = Path(base_dir)
+    if not base.is_dir():
+        return ""
+    rows = []
+    for p_dir in sorted(base.iterdir()):
+        if not p_dir.is_dir() or not p_dir.name.startswith("P_"):
+            continue
+        p_str = p_dir.name.replace("P_", "").replace("_atm", "").replace("p", ".").replace("m", "-")
+        try:
+            pressure = float(p_str)
+        except ValueError:
+            continue
+        log = read_mpmc_log(p_dir)
+        if log:
+            rows.append((pressure, log))
+    if not rows:
+        return ""
+    rows.sort(key=lambda r: r[0])
+
+    def pm(log: dict, key: str, fmt: str) -> str:
+        if key not in log:
+            return "-"
+        value, err = log[key]
+        return f"{value:{fmt}}" + (f" ± {err:{fmt}}" if err is not None else "")
+
+    lines = ["MPMC's own averages (whole run, from the log files):", "",
+             f"{'P (atm)':>10}  {'N (molecules)':>20}  {'wt %':>18}  {'Qst (kJ/mol)':>12}"]
+    unfinished = []
+    for pressure, log in rows:
+        lines.append(f"{pressure:>10g}  {pm(log, 'N', '.3f'):>20}  {pm(log, 'wt', '.4f'):>18}  "
+                     f"{pm(log, 'qst', '.3f'):>12}")
+        if not log["finished"]:
+            done = f" (step {log['step']}/{log['steps']})" if "step" in log else ""
+            unfinished.append(f"⚠ {pressure:g} atm has not finished{done}; its numbers will "
+                              f"still change.")
+    lines += [""] + unfinished
+    lines.append("The plot shows the average of N over the last quarter of energy.dat; MPMC's "
+                 "average covers the whole run, including equilibration, so the two differ "
+                 "until the run is long.")
+    return "\n".join(lines)

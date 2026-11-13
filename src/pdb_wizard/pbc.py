@@ -70,6 +70,33 @@ class PBC:
         self.gamma = gamma
         self._compute_matrices()
 
+    def perpendicular_widths(self) -> np.ndarray:
+        """Distance between each pair of opposite cell faces (Å), for a, b, c.
+
+        Half the smallest of these is the largest cutoff for which the
+        rounding minimum image (used here and in MPMC) finds every pair.
+        For a skewed cell it is shorter than min(a, b, c) / 2.
+        """
+        m = self.basis_matrix
+        areas = np.array([
+            np.linalg.norm(np.cross(m[1], m[2])),
+            np.linalg.norm(np.cross(m[2], m[0])),
+            np.linalg.norm(np.cross(m[0], m[1])),
+        ])
+        return abs(self.volume) / areas
+
+    def shortest_lattice_vector(self, max_coef: int = 5) -> float:
+        """Length of the shortest nonzero lattice vector (Å).
+
+        Mirrors MPMC's pbc_cutoff() (src/energy/pbc.c, MAX_VECT_COEF = 5):
+        when mpmc.inp has no pbc_cutoff, MPMC uses half of this value.
+        """
+        r = np.arange(-max_coef, max_coef + 1)
+        coefs = np.array(np.meshgrid(r, r, r, indexing="ij")).reshape(3, -1).T
+        coefs = coefs[np.any(coefs != 0, axis=1)]
+        vecs = coefs @ self.basis_matrix
+        return float(np.sqrt((vecs * vecs).sum(axis=1)).min())
+
     def min_image(self, dx: np.ndarray) -> float:
         img = np.matmul(dx, self.reciprocal_basis_matrix)
         img = np.round(img)

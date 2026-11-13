@@ -160,9 +160,14 @@ def apply_ff_to_system_report(
     Atoms whose element is absent from the force field get all parameters set
     to zero, as the original pdb_wizard did, and are counted in the returned
     dict so the caller can warn the user instead of silently writing zeros.
+    Movable (M) molecules read from an MPMC file are skipped: they carry their
+    own model parameters (e.g. a water model), which a framework force field
+    must not overwrite.
     """
     missing: dict[str, int] = {}
     for atom in system:
+        if atom.mpmc_flag == "M":
+            continue
         el = atom.element.symbol
         if el in ff:
             params = ff[el]

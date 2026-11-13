@@ -13,6 +13,15 @@ that potential form. The PHAHST MOF force field parameters are in forcefields.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+from numpy import cos, pi, sin, sqrt
+
+from pdb_wizard.atom import Atom
+from pdb_wizard.io import _expand_numeric_tokens, require_cell
+from pdb_wizard.molecule import Molecule
 
 
 @dataclass
@@ -127,15 +136,30 @@ SORBATE_MODELS: dict[str, SorbateModel] = {
         _s("HYD", 0.58588, -0.75695, 0, 1.008, 0.52, 0, 0, 0),
         _s("M", 0.15, 0, 0, 0, -1.04, 0, 0, 0),
     ]),
+    # Berendsen et al., J. Phys. Chem. 91, 6269 (1987): r_OH 1.0 A, HOH 109.47 deg
+    "h2o_spce": SorbateModel("h2o_spce", "H2O", "H2O SPC/E 3-site", "lj", [
+        _s("OXY", 0, 0, 0, 15.9994, -0.8476, 0, 78.2, 3.166),
+        _s("HYD", 0.81650, -0.57735, 0, 1.008, 0.4238, 0, 0, 0),
+        _s("HYD", -0.81650, -0.57735, 0, 1.008, 0.4238, 0, 0, 0),
+    ]),
+    # Mahoney & Jorgensen, J. Chem. Phys. 112, 8910 (2000): r_OL 0.70 A, LOL 109.47 deg
+    "h2o_tip5p": SorbateModel("h2o_tip5p", "H2O", "H2O TIP5P 5-site", "lj", [
+        _s("OXY", 0, 0, 0, 15.9994, 0, 0, 80.51, 3.12),
+        _s("HYD", 0.75695, -0.58588, 0, 1.008, 0.241, 0, 0, 0),
+        _s("HYD", -0.75695, -0.58588, 0, 1.008, 0.241, 0, 0, 0),
+        _s("LP", 0, 0.40415, 0.57155, 0, -0.241, 0, 0, 0),
+        _s("LP", 0, 0.40415, -0.57155, 0, -0.241, 0, 0, 0),
+    ]),
     # --- Noble gases ---
     "he": SorbateModel("he", "He", "Helium pore volume probe", "lj", [
         _s("He", 0, 0, 0, 4.002602, 0, 0, 10.22, 2.28),
     ]),
     # --- O2 ---
+    # O mass 15.9994: the MPMC repo's file has 7.9997 per O, half the molecule's mass
     "o2_trappe": SorbateModel("o2_trappe", "O2", "O2 TraPPE 3-site", "lj", [
-        _s("O", -0.605, 0, 0, 7.9997, -0.113, 0, 49.0, 3.02),
+        _s("O", -0.605, 0, 0, 15.9994, -0.113, 0, 49.0, 3.02),
         _s("CoM", 0, 0, 0, 0, 0.226, 0, 0, 0),
-        _s("O", 0.605, 0, 0, 7.9997, -0.113, 0, 49.0, 3.02),
+        _s("O", 0.605, 0, 0, 15.9994, -0.113, 0, 49.0, 3.02),
     ]),
 
     # =========================================================================
@@ -155,8 +179,10 @@ SORBATE_MODELS: dict[str, SorbateModel] = {
         _s("COG", 0, 0, 0, 12.0107, 0.77134, 1.2281, 19.61757, 3.03366),
         _s("COE", 1.162, 0, 0, 15.9994, -0.38567, 0.7395, 0, 0),
         _s("COE", -1.162, 0, 0, 15.9994, -0.38567, 0.7395, 0, 0),
-        _s("CON", 1.208, 0, 0, 0, 0, 0, 46.47457, 2.99429),
-        _s("CON", -1.208, 0, 0, 0, 0, 0, 46.47457, 2.99429),
+        # LJ sites at 1.114 Å (Mullen et al., JCTC 2013, Table 2; Pham et al. 2017); the
+        # MPMC repo's file has 1.208
+        _s("CON", 1.114, 0, 0, 0, 0, 0, 46.47457, 2.99429),
+        _s("CON", -1.114, 0, 0, 0, 0, 0, 46.47457, 2.99429),
     ]),
     "co2_becker": SorbateModel("co2_becker", "CO2", "CO2 Becker 3-site polarizable", "lj_polar", [
         _s("COG", 0, 0, 0, 12.01, 0.7, 0.916, 23.4, 2.8),
@@ -180,14 +206,23 @@ SORBATE_MODELS: dict[str, SorbateModel] = {
         _s("N2G", 0, 0, 0, 0, 1.04742, 1.4559, 20.6365, 3.42344),
         _s("N2E", 0.549, 0, 0, 14.0067, -0.52371, 0.5138, 0, 0),
         _s("N2E", -0.549, 0, 0, 14.0067, -0.52371, 0.5138, 0, 0),
-        _s("N2N", 0.738, 0, 0, 0, 0, 0, 18.12772, 3.15125),
-        _s("N2N", -0.738, 0, 0, 0, 0, 0, 18.12772, 3.15125),
+        # The MPMC repo's n2_polar LJ sites; 18.128 K / 3.151 Å at 0.738 Å, used here
+        # before, are the non-polarizable model's
+        _s("N2N", 0.7445, 0, 0, 0, 0, 0, 16.142, 3.16141),
+        _s("N2N", -0.7445, 0, 0, 0, 0, 0, 16.142, 3.16141),
     ]),
     # --- Water ---
     "h2o_pol3": SorbateModel("h2o_pol3", "H2O", "H2O POL3 3-site polarizable", "lj_polar", [
         _s("OXY", 0, 0, 0, 15.999, -0.73, 0.528, 78.50225, 3.596),
         _s("HYD", -0.816, -0.577, 0, 1.0079, 0.365, 0.17, 0, 0),
         _s("HYD", 0.816, -0.577, 0, 1.0079, 0.365, 0.17, 0, 0),
+    ]),
+    # Dang & Chang, J. Chem. Phys. 106, 8149 (1997): polarizable M site 0.215 A from O
+    "h2o_dc97": SorbateModel("h2o_dc97", "H2O", "H2O DC97 4-site polarizable", "lj_polar", [
+        _s("OXY", 0, 0, 0, 15.9994, 0, 0, 91.84, 3.234),
+        _s("HYD", 0.75695, -0.58588, 0, 1.008, 0.519, 0, 0, 0),
+        _s("HYD", -0.75695, -0.58588, 0, 1.008, 0.519, 0, 0, 0),
+        _s("M", 0, -0.215, 0, 0, -1.038, 1.444, 0, 0),
     ]),
     # --- Noble gases (polarizable LJ) ---
     "ar_pol": SorbateModel("ar_pol", "Ar", "Argon polarizable (LJ)", "lj_polar", [
@@ -250,17 +285,190 @@ def format_sorbate_pqr(model_name: str, center_x: float, center_y: float,
                        center_z: float, mol_id: int, start_atom_id: int) -> list[str]:
     """Generate MPMC PQR lines for a sorbate placed at the given center coordinates."""
     model = SORBATE_MODELS[model_name]
-    lines = []
-    for i, site in enumerate(model.sites):
-        atom_id = start_atom_id + i
-        x = center_x + site.x
-        y = center_y + site.y
-        z = center_z + site.z
-        lines.append(
-            f"ATOM {atom_id:>6} {site.atomtype:<4} {model.label:<3} M {mol_id:>4}    "
-            f"{x:>10.6f} {y:>10.6f} {z:>10.6f}"
-            f" {site.mass:>9.5f} {site.charge:>9.5f}"
-            f" {site.polarizability:>9.5f} {site.epsilon:>9.5f} {site.sigma:>9.5f}"
-            f" 0.0 0.0 {site.c6:>10.5f} {site.c8:>12.5f} {site.c10:>14.5f}"
-        )
+    return [
+        _sorbate_atom_line(model, site, start_atom_id + i, mol_id,
+                           (center_x + site.x, center_y + site.y, center_z + site.z))
+        for i, site in enumerate(model.sites)
+    ]
+
+
+def _sorbate_atom_line(model: SorbateModel, site: SorbateSite, atom_id: int,
+                       mol_id: int, xyz) -> str:
+    """One movable (M) MPMC atom record for a sorbate site at cartesian ``xyz``."""
+    x, y, z = xyz
+    return (
+        f"ATOM {atom_id:>6} {site.atomtype:<4} {model.label:<3} M {mol_id:>4}    "
+        f"{x:>10.6f} {y:>10.6f} {z:>10.6f}"
+        f" {site.mass:>9.5f} {site.charge:>9.5f}"
+        f" {site.polarizability:>9.5f} {site.epsilon:>9.5f} {site.sigma:>9.5f}"
+        f" 0.0 0.0 {site.c6:>10.5f} {site.c8:>12.5f} {site.c10:>14.5f}"
+    )
+
+
+# ======================================================================
+# Module: insert
+# ======================================================================
+"""Pack rigid sorbate molecules into a periodic cell (a small packmol for MPMC).
+
+Molecules get a random position and a uniformly random orientation. A trial is
+kept only if no site lands too close to a framework atom or to an already
+placed molecule, measured with the minimum image in the actual (triclinic)
+cell, so skewed and monoclinic cells work. "Too close" for a site pair is
+
+    d < max(min_dist, scale * (r_i + r_j))
+
+where r is sigma/2 for sites with LJ parameters, the element vdW radius for
+framework atoms that have no sigma yet, and 0 for charge-only sites (H, M, LP),
+which are then only kept min_dist away.
+"""
+
+
+def read_sorbate_template(path: str | Path) -> SorbateModel:
+    """First movable (M) molecule of an MPMC .pqr, as a SorbateModel.
+
+    Lets users insert any model MPMC can read, not just the built-in ones.
+    Raises ValueError when the file has no M molecule.
+    """
+    sites: list[SorbateSite] = []
+    label, mol_id = "MOL", None
+    for line in Path(path).read_text().splitlines():
+        tok = _expand_numeric_tokens(line.split())
+        if len(tok) < 14 or tok[0] not in ("ATOM", "HETATM") or tok[4] != "M":
+            continue
+        if mol_id is None:
+            mol_id, label = tok[5], tok[3]
+        elif tok[5] != mol_id:
+            break
+        c = [float(v) for v in tok[16:19]] if len(tok) > 18 else [0.0, 0.0, 0.0]
+        sites.append(SorbateSite(tok[2], float(tok[6]), float(tok[7]), float(tok[8]),
+                                 float(tok[9]), float(tok[10]), float(tok[11]),
+                                 float(tok[12]), float(tok[13]), *c))
+    if not sites:
+        raise ValueError(f"{path}: no movable (M) molecule found")
+    pot = "phahst" if any(s.c6 for s in sites) else (
+        "lj_polar" if any(s.polarizability for s in sites) else "lj")
+    return SorbateModel(Path(path).stem, label, f"from {Path(path).name}", pot, sites)
+
+
+def _random_rotation(rng: np.random.Generator) -> np.ndarray:
+    """Uniformly distributed rotation matrix (Shoemake 1992)."""
+    u1, u2, u3 = rng.random(3)
+    a, b = sqrt(1.0 - u1), sqrt(u1)
+    x, y = a * sin(2 * pi * u2), a * cos(2 * pi * u2)
+    z, w = b * sin(2 * pi * u3), b * cos(2 * pi * u3)
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+def insert_sorbates(
+    mol: Molecule,
+    model: SorbateModel | str,
+    n: int | None = None,
+    *,
+    scale: float = 0.85,
+    min_dist: float = 1.0,
+    max_failures: int = 5000,
+    seed: int | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+) -> list[np.ndarray]:
+    """Place up to ``n`` copies of ``model`` in ``mol``'s cell without overlaps.
+
+    ``n=None`` fills the cell: insertion stops after ``max_failures`` rejected
+    trials in a row. With a number it also stops there, so fewer than ``n``
+    may fit; check ``len()`` of the result. Returns one (n_sites, 3) array of
+    cartesian site positions per placed molecule. ``mol`` is not modified.
+    Raises CellRequiredError when ``mol`` has no cell.
+    """
+    require_cell(mol, "Inserting sorbates")
+    if isinstance(model, str):
+        model = SORBATE_MODELS[model]
+    pbc = mol.pbc
+    basis, recip = pbc.basis_matrix, pbc.reciprocal_basis_matrix
+    rng = np.random.default_rng(seed)
+
+    sites = np.array([[s.x, s.y, s.z] for s in model.sites], dtype=float)
+    masses = np.array([s.mass for s in model.sites], dtype=float)
+    center = (masses @ sites / masses.sum()) if masses.sum() > 0 else sites.mean(axis=0)
+    sites -= center
+    site_r = np.array([s.sigma / 2 if s.sigma > 0 and model.pot_type != "phahst" else 0.0
+                       for s in model.sites])
+
+    fw_xyz = np.array([a.x for a in mol.atoms], dtype=float).reshape(-1, 3)
+    fw_r = np.array([a.sigma / 2 if a.sigma > 0 else a.vdw for a in mol.atoms], dtype=float)
+    # Sample centers in the same periodic image as the framework (e.g. a cell
+    # stored from -1/2 to 1/2), so molecules show up inside it in the viewer.
+    # Molecules are kept whole: never wrap their atoms one by one.
+    window = (np.mean(fw_xyz @ recip, axis=0) - 0.5) if len(fw_xyz) else np.zeros(3)
+
+    placed: list[np.ndarray] = []
+    others_xyz, others_r = fw_xyz, fw_r
+    failures = 0
+    while (n is None or len(placed) < n) and failures < max_failures:
+        trial = sites @ _random_rotation(rng).T + (window + rng.random(3)) @ basis
+        if len(others_xyz):
+            d = trial[:, None, :] - others_xyz[None, :, :]
+            d -= np.round(d @ recip) @ basis
+            dist = np.sqrt((d * d).sum(axis=2))
+            limit = np.maximum(min_dist, scale * (site_r[:, None] + others_r[None, :]))
+            if (dist < limit).any():
+                failures += 1
+                continue
+        placed.append(trial)
+        others_xyz = np.vstack([others_xyz, trial])
+        others_r = np.concatenate([others_r, site_r])
+        failures = 0
+        if progress_callback is not None:
+            progress_callback(len(placed))
+    return placed
+
+
+def format_inserted_sorbates(model: SorbateModel | str, placements: list[np.ndarray],
+                             start_atom_id: int, start_mol_id: int = 2) -> list[str]:
+    """MPMC atom records for ``insert_sorbates`` output, one molecule ID per copy.
+
+    Pass the result to ``write_mpmc_pdb(..., sorbate_lines=...)``.
+    """
+    if isinstance(model, str):
+        model = SORBATE_MODELS[model]
+    lines, atom_id = [], start_atom_id
+    for k, xyz in enumerate(placements):
+        if len(xyz) != len(model.sites):
+            raise ValueError(f"placement {k} has {len(xyz)} sites, "
+                             f"{model.name} has {len(model.sites)}")
+        for site, pos in zip(model.sites, xyz):  # no strict=: must run on Python 3.7
+            lines.append(_sorbate_atom_line(model, site, atom_id, start_mol_id + k, pos))
+            atom_id += 1
     return lines
+
+
+def sorbate_atoms(model: SorbateModel, placements, first_mol_id: int) -> list:
+    """Atoms for packed sorbate molecules, flagged movable (M) with consecutive molecule
+    ids so an MPMC export keeps them movable. ``placements`` is what insert_sorbates
+    returns: one (n_sites, 3) array per molecule."""
+    atoms = []
+    for k, xyz in enumerate(placements):
+        for site, pos in zip(model.sites, xyz):
+            atom = Atom(pos[0], pos[1], pos[2], site.atomtype)
+            atom.charge, atom.alpha = site.charge, site.polarizability
+            atom.epsilon, atom.sigma = site.epsilon, site.sigma
+            atom.c6, atom.c8, atom.c10 = site.c6, site.c8, site.c10
+            atom.mpmc_flag, atom.mpmc_mol = "M", first_mol_id + k
+            atom.mpmc_res, atom.file_mass = model.label, site.mass
+            atoms.append(atom)
+    return atoms
+
+
+def parse_sorbate_count(text: str):
+    """'fill' -> None (pack until full), a positive whole number -> that number.
+
+    Anything else raises ValueError (unicode digits such as '²' included).
+    """
+    raw = text.strip().lower()
+    if raw == "fill":
+        return None
+    if raw.isascii() and raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    raise ValueError("Enter a positive number or 'fill'")

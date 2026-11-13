@@ -246,6 +246,7 @@ def test_all_save_commands_have_a_persist_contract():
     covered = {c for c, _ in PERSIST_COMMANDS}
     exempt = {
         "write_mpmc": "multi-step charge/FF/sorbate flow; covered by its own e2e",
+        "write_crystal": "asks for a space group first; covered by tests/test_crystal.py",
         "open_file": "reads, not writes",
         "frame_to_tab": "in-memory tab, no file",
         "export_png": "image export, not a structure file",

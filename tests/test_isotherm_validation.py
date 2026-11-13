@@ -100,12 +100,14 @@ class TestValidatorWarnings:
         errors, warnings = validate_for_mpmc(mol, lj_cutoff=_DEFAULT_LJ_CUTOFF)
         assert any("box" in w.lower() or "cutoff" in w.lower() for w in warnings), warnings
 
-    def test_triclinic_cell_warns(self):
+    def test_triclinic_cell_does_not_warn(self):
+        """'abcbasis a b c α β γ' builds the same basis as PBC, so a skewed but
+        roomy cell needs no warning (space-group-environment PR #8)."""
         mol = _well_charged_mof()
-        mol.pbc = PBC(20, 20, 20, 90.0, 100.0, 90.0)  # β skewed
+        mol.pbc = PBC(30, 30, 30, 90.0, 100.0, 90.0)  # β skewed, wide enough for the cutoff
         errors, warnings = validate_for_mpmc(mol)
-        assert any("orthorhombic" in w.lower() or "abcbasis" in w.lower()
-                   for w in warnings), warnings
+        assert not any("orthorhombic" in w.lower() or "abcbasis" in w.lower()
+                       for w in warnings), warnings
 
     def test_sorbate_overlap_warns(self):
         mol = _well_charged_mof()

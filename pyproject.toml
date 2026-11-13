@@ -2,7 +2,7 @@
 name = "pdb-wizard"
 version = "0.5.0"
 description = "Molecular structure processor and interactive 3D terminal viewer"
-readme = {text = "", content-type = "text/plain"}
+readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.7"
 authors = [
@@ -30,8 +30,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-viewer = ["textual>=3.0"]
-test = ["pytest>=7.0", "pytest-cov"]
+viewer = ["textual>=3.0", "Pillow"]  # Pillow: PNG and rotation-GIF export
+gui = ["PySide6>=6.4", "Pillow"]
+symmetry = ["spglib>=2.0"]  # Find Symmetry and symmetry-reduced CRYSTAL23 inputs
+test = [
+    "pytest>=7.0", "pytest-cov", "pytest-asyncio", "pytest-xdist", "pytest-qt",
+    "hypothesis", "python-minifier", "Pillow", "spglib>=2.0",
+]
 
 [project.scripts]
 pdb_wizard = "pdb_wizard.__main__:main"

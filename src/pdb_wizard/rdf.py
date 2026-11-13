@@ -7,6 +7,12 @@ import numpy as np
 from pdb_wizard.molecule import Molecule
 
 
+def _select(mol: Molecule, element: str, name: str | None) -> np.ndarray:
+    return np.array([i for i, a in enumerate(mol.atoms)
+                     if a.element.symbol == element
+                     and (name is None or a.name.strip() == name)], dtype=int)
+
+
 def compute_rdf(
     mol: Molecule,
     type1: str,
@@ -14,6 +20,8 @@ def compute_rdf(
     n_bins: int = 200,
     r_max: float | None = None,
     progress_callback=None,
+    name1: str | None = None,
+    name2: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute the RDF g(r) between two atom types for a single frame.
 
@@ -24,9 +32,11 @@ def compute_rdf(
         n_bins: Number of histogram bins.
         r_max: Maximum distance (default: half the shortest cell dimension).
         progress_callback: Optional callable(frac: float).
+        name1, name2: Optional atom names (e.g. "OW") narrowing each type.
 
     Returns:
-        (r_values, g_r) arrays.
+        (r_values, g_r) arrays. g(r) tends to 1 at long range for an ideal gas, both for
+        a type with itself (each pair counted once, hence the factor 2) and for two types.
     """
     if mol.pbc is None:
         return np.array([]), np.array([])
@@ -35,34 +45,39 @@ def compute_rdf(
     if r_max is None:
         r_max = min(pbc.a, pbc.b, pbc.c) / 2.0
 
-    idx1 = [i for i, a in enumerate(mol.atoms) if a.element.symbol == type1]
-    idx2 = [i for i, a in enumerate(mol.atoms) if a.element.symbol == type2]
+    idx1 = _select(mol, type1, name1)
+    idx2 = _select(mol, type2, name2)
 
-    if not idx1 or not idx2:
+    if not len(idx1) or not len(idx2):
         return np.array([]), np.array([])
 
     coords = np.array([a.x for a in mol.atoms])
     dr = r_max / n_bins
     hist = np.zeros(n_bins)
 
-    same_type = type1 == type2
+    same_type = len(idx1) == len(idx2) and bool(np.array_equal(idx1, idx2))
     total = len(idx1)
+    targets = coords[idx2]
+    # rows of the i x j distance matrix per block, keeping a block near 2M pairs
+    block = max(1, 2_000_000 // len(idx2))
 
-    for ci, i in enumerate(idx1):
-        targets = idx2 if not same_type else [j for j in idx2 if j > i]
-        if not targets:
-            continue
-        dx = coords[targets] - coords[i]
+    for b0 in range(0, total, block):
+        rows = np.arange(b0, min(b0 + block, total))
+        dx = targets[None, :, :] - coords[idx1[rows]][:, None, :]
         frac = dx @ pbc.reciprocal_basis_matrix
         wrapped = dx - np.round(frac) @ pbc.basis_matrix
-        dists = np.linalg.norm(wrapped, axis=1)
-        bins = (dists / dr).astype(int)
-        valid = (bins >= 0) & (bins < n_bins) & (dists < r_max)
-        for b in bins[valid]:
-            hist[b] += 1
+        dists = np.linalg.norm(wrapped, axis=2)
+        if same_type:  # each pair once: j after i
+            keep = np.arange(len(idx2))[None, :] > rows[:, None]
+        else:  # overlapping selections (e.g. all O vs OW): never an atom with itself
+            keep = idx2[None, :] != idx1[rows][:, None]
+        d = dists[keep]
+        bins = (d / dr).astype(int)
+        valid = (bins >= 0) & (bins < n_bins) & (d < r_max)
+        hist += np.bincount(bins[valid], minlength=n_bins)[:n_bins]
 
-        if progress_callback and ci % max(1, total // 20) == 0:
-            progress_callback(ci / total)
+        if progress_callback:
+            progress_callback(rows[-1] / total)
 
     if progress_callback:
         progress_callback(1.0)
@@ -100,6 +115,8 @@ def compute_rdf_trajectory(
     n_bins: int = 200,
     r_max: float | None = None,
     progress_callback=None,
+    name1: str | None = None,
+    name2: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute the RDF averaged over multiple trajectory frames."""
     if not frames:
@@ -110,7 +127,12 @@ def compute_rdf_trajectory(
     n_frames = len(frames)
 
     for fi, mol in enumerate(frames):
-        r, g = compute_rdf(mol, type1, type2, n_bins=n_bins, r_max=r_max)
+        def _frame_progress(frac, _fi=fi):
+            if progress_callback:
+                progress_callback((_fi + frac) / n_frames)
+
+        r, g = compute_rdf(mol, type1, type2, n_bins=n_bins, r_max=r_max,
+                           progress_callback=_frame_progress, name1=name1, name2=name2)
         if len(r) == 0:
             continue
         if g_sum is None:

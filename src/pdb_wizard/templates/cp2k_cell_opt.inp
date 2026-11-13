@@ -14,10 +14,9 @@
   STRESS_TENSOR ANALYTICAL
   &SUBSYS
     &CELL
-      A   {{{cell_a}}} 0.000000 0.000000
-      B   0.000000 {{{cell_b}}} 0.000000
-      C   0.000000 0.000000 {{{cell_c}}}
-      ALPHA_BETA_GAMMA {{{cell_alpha}}} {{{cell_beta}}} {{{cell_gamma}}}
+      A   {{{cell_vec_a}}}
+      B   {{{cell_vec_b}}}
+      C   {{{cell_vec_c}}}
       PERIODIC XYZ
     &END CELL
     &TOPOLOGY

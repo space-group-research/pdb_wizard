@@ -353,11 +353,15 @@ class TestRegressions:
         from pdb_wizard.io import detect_filetype
         assert detect_filetype("opt.log") == "gaussian_log"
 
-    def test_detect_filetype_out_is_not_gaussian(self):
-        """Generic .out files should NOT be detected as Gaussian."""
-        from pdb_wizard.io import detect_filetype
-        with pytest.raises(ValueError):
-            detect_filetype("output.out")
+    def test_detect_filetype_out_is_not_gaussian(self, tmp_path):
+        """.out is a CRYSTAL output, never Gaussian; one without a CRYSTAL geometry is
+        refused with a clear message instead of being guessed at."""
+        from pdb_wizard.io import detect_filetype, read_file
+        assert detect_filetype("output.out") == "crystal_out"
+        other = tmp_path / "orca.out"
+        other.write_text("* O R C A *\nFINAL SINGLE POINT ENERGY -76.4\n")
+        with pytest.raises(ValueError, match="No CRYSTAL geometry found"):
+            read_file(str(other))
 
     def test_detect_filetype_sdf(self):
         from pdb_wizard.io import detect_filetype

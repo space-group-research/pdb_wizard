@@ -31,6 +31,8 @@ from pdb_wizard.molecule import Molecule
 OPERATIONS = [
     # ---- Analysis (mirrors top bar Analysis menu) ----
     ("info",           "System Info",              "analysis"),
+    ("check",          "Check Structure",          "analysis"),
+    ("symmetry",       "Find Symmetry",            "analysis"),
     ("void_vol",       "Void Volume",              "analysis"),
     ("surface_area",   "Surface Area",             "analysis"),
     ("pore_size",      "Pore Size Distribution",   "analysis"),
@@ -58,6 +60,7 @@ OPERATIONS = [
     ("update_cell",    "Update Unit Cell",         "modify"),
     ("substitute",     "Substitute Element",       "modify"),
     ("reduce_cell",    "Reduce Supercell",         "modify"),
+    ("pack_sorbates",  "Pack Sorbates",            "modify"),
     ("qeq_charges",    "Generate QEq Charges",     "modify"),
     # ---- File (mirrors top bar File menu) ----
     ("open_file",      "Open File...",             "export"),
@@ -66,6 +69,7 @@ OPERATIONS = [
     ("write_cif",      "Save as CIF",              "export"),
     ("write_poscar",   "Save as POSCAR",           "export"),
     ("write_lammps",   "Save as LAMMPS Data",      "export"),
+    ("write_crystal",  "Save as CRYSTAL23 .d12",   "export"),
     ("write_mpmc",     "Save as MPMC PDB",         "export"),
     ("frame_to_tab",   "Open Frame in New Tab",    "export"),
     ("export_png",     "Export PNG",               "export"),
