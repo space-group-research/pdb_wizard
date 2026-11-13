@@ -515,3 +515,24 @@ def test_mpmc_engine_checks_are_unchanged():
     mol = hkust()
     check = check_engine(mol, "mpmc_isotherm", {"sorbate": "h2_bss"})
     assert check.ok and engine_cautions(mol, "mpmc_isotherm") == []
+
+
+def test_co2_sites_are_not_mistaken_for_cobalt():
+    """MPMC's CO2 sites are named COG/COE, which reads as Co; their masses say C and O."""
+    from pdb_wizard.io import site_element
+    mol = hkust()
+    for a in mol.atoms:
+        if a.element.symbol == "Cu":
+            a._element = Atom(0, 0, 0, "Zn").element
+    placed = insert_sorbates(mol, SORBATE_MODELS["co2_phast"], 4, seed=1)
+    mol.atoms.extend(sorbate_atoms(SORBATE_MODELS["co2_phast"], placed, next_mpmc_mol_id(mol)))
+    assert open_shell_metals(mol) == []
+    assert "Open-shell metals" not in check_text(mol)
+    sites = [site_element(a) for a in mol.atoms[624:629]]
+    assert [s.symbol if s else None for s in sites] == ["C", "O", "O", None, None]
+    framework = {site_element(a).symbol for a in mol.atoms[:624]}
+    assert framework == {"C", "H", "O", "Zn"}  # framework atoms keep their own element
+    united = Atom(0, 0, 0, "CH4")
+    united.mpmc_flag = "M"
+    united.file_mass = 16.04  # no single element has this mass: keep the name-based guess
+    assert site_element(united) is united.element

@@ -15,7 +15,7 @@ from typing import List, Optional
 import numpy as np
 
 from pdb_wizard.geometry import _pairs_within, _same_movable_molecule, get_lone_atoms
-from pdb_wizard.io import is_fallback_cell
+from pdb_wizard.io import is_fallback_cell, site_element
 from pdb_wizard.molecule import Molecule
 
 CHECK_ERROR, CHECK_WARNING, CHECK_NOTE = "error", "warning", "note"
@@ -42,7 +42,10 @@ def load_notes(mol: Optional[Molecule]) -> List[str]:
 
 
 def open_shell_metals(mol: Molecule) -> List[str]:
-    return sorted({a.element.symbol for a in mol.atoms} & OPEN_SHELL_METALS)
+    """Open-shell metals really present: sorbate sites are judged by their mass, so the
+    'COG'/'COE' sites of a CO2 model are not mistaken for cobalt."""
+    symbols = {el.symbol for el in (site_element(a) for a in mol.atoms) if el is not None}
+    return sorted(symbols & OPEN_SHELL_METALS)
 
 
 def lone_atom_summary(mol: Molecule) -> str:

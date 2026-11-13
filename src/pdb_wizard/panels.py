@@ -32,6 +32,7 @@ OPERATIONS = [
     # ---- Analysis (mirrors top bar Analysis menu) ----
     ("info",           "System Info",              "analysis"),
     ("check",          "Check Structure",          "analysis"),
+    ("symmetry",       "Find Symmetry",            "analysis"),
     ("void_vol",       "Void Volume",              "analysis"),
     ("surface_area",   "Surface Area",             "analysis"),
     ("pore_size",      "Pore Size Distribution",   "analysis"),
@@ -68,6 +69,7 @@ OPERATIONS = [
     ("write_cif",      "Save as CIF",              "export"),
     ("write_poscar",   "Save as POSCAR",           "export"),
     ("write_lammps",   "Save as LAMMPS Data",      "export"),
+    ("write_crystal",  "Save as CRYSTAL23 .d12",   "export"),
     ("write_mpmc",     "Save as MPMC PDB",         "export"),
     ("frame_to_tab",   "Open Frame in New Tab",    "export"),
     ("export_png",     "Export PNG",               "export"),

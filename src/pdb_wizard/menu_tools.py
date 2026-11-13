@@ -37,6 +37,7 @@ from pdb_wizard.analyses import (
     run_rdf,
     run_rmsd,
     surface_area_text,
+    symmetry_text,
     system_info_text,
     unavailable,
     void_volume_text,
@@ -45,6 +46,7 @@ from pdb_wizard.analyses import (
 )
 from pdb_wizard.charges import apply_qeq_charges
 from pdb_wizard.constants import get_element
+from pdb_wizard.crystal import crystal_reduction_choice, write_crystal_d12
 from pdb_wizard.database import BACKENDS, modes_for, placeholder_for, search_backends
 from pdb_wizard.energy import read_energy_dat
 from pdb_wizard.formats import write_cif, write_lammps_data, write_poscar
@@ -86,6 +88,8 @@ CLASSIC_FEATURES: Dict[str, str] = {
     "pxrd": "main 11 > 13",
     "energy_plot": "main 11 > 14",
     "check": "main 11 > 15",
+    "symmetry": "main 13 > 7",
+    "write_crystal": "main 13 > 7",
     "input_generator": "main 14",
     "isotherm_plot": "main 15",
     "db_search": "main 16",
@@ -726,6 +730,33 @@ def _cm_write_picture(mol: Molecule, path: str, animated: bool) -> None:
     print(f"\nwrote {path} ({n} frames)")
 
 
+def _cm_write_crystal(mol: Molecule, stem: str) -> None:
+    """Print the symmetry ranking, ask which group to write, write the .d12."""
+    if mol.pbc is None:
+        print("\n!!! A CRYSTAL23 input needs a unit cell !!!")
+        return
+    print("\n" + symmetry_text(mol) + "\n")
+    try:
+        while True:
+            answer = _cm_ask("Space group to write (1 = P1 with every atom)", 1)
+            try:
+                reduction = crystal_reduction_choice(mol, answer)
+                break
+            except ValueError as e:
+                print(f"\n{e}\n")
+        path = _cm_ask("\noutput filename", stem + ".d12")
+        with open(path, "w") as out:
+            write_crystal_d12(mol, out, reduction)
+        what = "P1" if reduction is None else (f"space group {reduction.number} "
+                                               f"({reduction.symbol}), "
+                                               f"{len(reduction.numbers)} atoms")
+        print(f"wrote {path} in {what}")
+    except _CmCancel:
+        print("\nCancelled")
+    except (OSError, ValueError) as e:
+        print(f"!!! Error: {e} !!!")
+
+
 def cm_menu_write_other(mol: Molecule, filename: str) -> None:
     stem = os.path.splitext(filename)[0]
     writers = {1: (write_cif, ".cif"), 2: (write_poscar, ".vasp"), 3: (write_lammps_data, ".data")}
@@ -737,10 +768,14 @@ def cm_menu_write_other(mol: Molecule, filename: str) -> None:
             "3 = LAMMPS data file\n"
             "4 = PNG picture\n"
             "5 = rotating GIF\n"
-            "6 = back to main menu\n\n> "
+            "6 = back to main menu\n"
+            "7 = CRYSTAL23 .d12 (lists the space groups it fits first)\n\n> "
         )
         if option == 6:
             return
+        if option == 7:
+            _cm_write_crystal(mol, stem)
+            continue
         if option not in (1, 2, 3, 4, 5):
             if option:
                 print("\nInvalid option!")

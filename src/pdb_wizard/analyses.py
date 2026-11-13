@@ -16,6 +16,7 @@ import numpy as np
 
 from pdb_wizard.checks import mc_trajectory_warning, structure_check_text
 from pdb_wizard.coordination import compute_coordination, compute_coordination_trajectory
+from pdb_wizard.crystal import symmetry_report
 from pdb_wizard.density3d import compute_density_3d
 from pdb_wizard.density_profile import compute_density_profile, compute_density_profile_trajectory
 from pdb_wizard.gyration import compute_gyration_trajectory
@@ -112,7 +113,7 @@ def unavailable(key: str, mol: Optional[Molecule], frames: Optional[list]) -> Op
         return "Need a crystal structure with PBC for PXRD"
     if mol is None:
         return "No atoms loaded"
-    if key in ("info", "input_generator", "check"):
+    if key in ("info", "input_generator", "check", "symmetry"):
         return None
     if not mol.atoms:
         return "No atoms loaded yet" if key == "rdf" else "No atoms loaded"
@@ -178,6 +179,13 @@ def surface_area_text(mol: Molecule, n_samples: int = 100000, probe: float = 1.4
 def check_text(mol: Optional[Molecule], frames: Optional[list] = None) -> str:
     """The Check Structure report (see ``checks``)."""
     return structure_check_text(mol, frames)
+
+
+def symmetry_text(mol: Optional[Molecule]) -> str:
+    """The Find Symmetry report: space groups ranked by the atomic drift they need."""
+    if mol is None or not mol.atoms:
+        return "No atoms loaded"
+    return symmetry_report(mol)
 
 
 def charge_report(mol: Molecule) -> str:

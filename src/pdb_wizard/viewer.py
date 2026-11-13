@@ -3481,6 +3481,7 @@ MENU_FILE = [
     ("write_cif", "Save as CIF"),
     ("write_poscar", "Save as POSCAR"),
     ("write_lammps", "Save as LAMMPS Data"),
+    ("write_crystal", "Save as CRYSTAL23 .d12"),
     ("write_mpmc", "Save as MPMC PDB"),
     ("---", ""),
     ("frame_to_tab", "Open Frame in New Tab"),
@@ -3529,6 +3530,7 @@ MENU_VIEW = [
 MENU_ANALYSIS = [
     ("info", "System Info"),
     ("check", "Check Structure"),
+    ("symmetry", "Find Symmetry"),
     ("void_vol", "Void Volume"),
     ("surface_area", "Surface Area"),
     ("pore_size", "Pore Size Distribution"),
@@ -5183,6 +5185,22 @@ class PdbWizardApp(App):
             self.push_screen(InfoModal("Check Structure", check_text(mol, self._frames)))
             return
 
+        elif cmd == "symmetry":
+            from pdb_wizard.analyses import symmetry_text
+            self.push_screen(InfoModal("Find Symmetry", symmetry_text(mol)))
+            return
+
+        elif cmd == "write_crystal":
+            if not self._require_cell("Writing a CRYSTAL23 input"):
+                return
+            self.push_screen(
+                InputModal("Space group for the CRYSTAL23 input:", default="1",
+                           hint="1 writes every atom in P1. A number from Find Symmetry "
+                                "writes only that group's asymmetric unit."),
+                callback=self._crystal_step_group,
+            )
+            return
+
         elif cmd == "rdf":
             if len(mol.atoms) == 0:
                 self.notify("No atoms loaded yet", timeout=2)
@@ -5777,6 +5795,33 @@ class PdbWizardApp(App):
         from pdb_wizard.formats import write_poscar
         self._write_text_file(
             filepath, lambda f: write_poscar(self.molecule, f), "Writing POSCAR",
+        )
+
+    def _crystal_step_group(self, value: str | None) -> None:
+        if value is None:
+            return
+        from pdb_wizard.crystal import crystal_reduction_choice
+        try:
+            reduction = crystal_reduction_choice(self.molecule, value)
+        except ValueError as e:
+            self.notify(str(e), timeout=12, severity="warning")
+            return
+        stem = Path(self.filepath).stem
+        default = str(Path(self.filepath).parent / f"{stem}.d12")
+        self.push_screen(
+            FileSaveModal("Save CRYSTAL23 input as:", default=default),
+            callback=lambda path: self._do_write_crystal(path, reduction),
+        )
+
+    def _do_write_crystal(self, value: str, reduction) -> None:
+        if not value or not value.strip():
+            return
+        from pdb_wizard.crystal import write_crystal_d12
+        self._confirm_overwrite(
+            value.strip(),
+            lambda path: self._write_text_file(
+                path, lambda f: write_crystal_d12(self.molecule, f, reduction),
+                "Writing CRYSTAL23 input"),
         )
 
     def _do_write_lammps(self, value: str) -> None:

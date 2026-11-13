@@ -25,6 +25,7 @@ MODULE_ORDER = [
     "trajectory",
     "geometry",
     "checks",
+    "crystal",
     "operations",
     "renderer",
     "charges",

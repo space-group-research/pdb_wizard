@@ -32,6 +32,7 @@ from pdb_wizard.analyses import (
     find_energy_file,
     run_density_3d,
     surface_area_text,
+    symmetry_text,
     system_info_text,
     unavailable,
     void_volume_text,
@@ -40,6 +41,7 @@ from pdb_wizard.atom import Atom
 from pdb_wizard.charges import apply_qeq_charges
 from pdb_wizard.checks import load_notes, lone_atom_summary, lone_atom_warning
 from pdb_wizard.constants import get_element
+from pdb_wizard.crystal import crystal_reduction_choice, write_crystal_d12
 from pdb_wizard.energy import read_energy_dat
 from pdb_wizard.forcefields import (
     apply_ff_to_system_report,
@@ -120,11 +122,12 @@ _WRITERS = {
     ".poscar": write_poscar,
     ".lmp": write_lammps_data,
     ".data": write_lammps_data,
+    ".d12": write_crystal_d12,  # P1; MainWindow.save_crystal writes a symmetry-reduced one
 }
 _SAVE_FILTER = ("MPMC (*.pqr);;PDB (*.pdb);;XYZ (*.xyz);;CIF (*.cif);;"
-                "POSCAR (*.vasp *.poscar);;LAMMPS data (*.lmp *.data)")
+                "POSCAR (*.vasp *.poscar);;LAMMPS data (*.lmp *.data);;CRYSTAL23 input (*.d12)")
 _OPEN_FILTER = ("Structures (*.pdb *.pqr *.ent *.cif *.xyz *.vasp *.poscar POSCAR CONTCAR "
-                "*.lmp *.data *.sdf *.mol2 *.log *.com *.gjf *.zmat *.dcd);;All files (*)")
+                "*.lmp *.data *.sdf *.mol2 *.log *.com *.gjf *.zmat *.dcd *.out);;All files (*)")
 _FORCE_FIELDS = [("None", None), ("OPLS-AA / UFF", 0), ("PHAHST", 1)]
 _DUMMY_RADIUS = 0.15  # A, drawn size of massless model sites (water M/LP, H2 centres)
 
@@ -1387,6 +1390,7 @@ class MainWindow(_QMainWindow):
         action(t, "&Input generator…", lambda: self.open_tool("input_generator"), "Ctrl+I")
 
         for key, label in (("info", "System &info"), ("check", "Chec&k structure"),
+                           ("symmetry", "Find s&ymmetry"),
                            ("void_vol", "&Void volume"),
                            ("surface_area", "&Surface area"),
                            ("pore_size", "&Pore size distribution"), (None, None),
@@ -1877,8 +1881,36 @@ class MainWindow(_QMainWindow):
             return
         start = str(Path(self.path).with_suffix(".pqr")) if self.path else "structure.pqr"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save structure", start, _SAVE_FILTER)
-        if path:
+        if path and path.lower().endswith(".d12"):
+            group = self._ask_space_group()
+            if group is not None:
+                self.save_crystal(path, group)
+        elif path:
             self.save_path(path)
+
+    def _ask_space_group(self) -> Optional[str]:
+        """Which space group to write a CRYSTAL23 input in (None if cancelled)."""
+        text, ok = QtWidgets.QInputDialog.getText(
+            self, "CRYSTAL23 input",
+            "Space group number (1 = P1, every atom).\n"
+            "Analysis > Find symmetry lists the groups this structure fits.", text="1")
+        return text if ok else None
+
+    def save_crystal(self, path: str, group: str = "1") -> bool:
+        """Write a CRYSTAL23 .d12: P1 for group 1, else that group's asymmetric unit."""
+        if not self._need_structure("Writing a CRYSTAL23 input", cell=True):
+            return False
+        try:
+            reduction = crystal_reduction_choice(self.mol, group)
+            with open(path, "w") as fh:
+                write_crystal_d12(self.mol, fh, reduction)
+        except (OSError, ValueError) as e:
+            self._warn(f"Could not write {Path(path).name}:\n{e}")
+            return False
+        what = "P1" if reduction is None else f"space group {reduction.number} " \
+            f"({reduction.symbol}), {len(reduction.numbers)} atoms"
+        self.statusBar().showMessage(f"Saved {path} in {what}", 8000)
+        return True
 
     def save_path(self, path: str) -> bool:
         try:
@@ -2249,6 +2281,8 @@ class MainWindow(_QMainWindow):
             return self.report("System Info", system_info_text(mol, self.path or ""))
         if key == "check":
             return self.report("Check Structure", check_text(mol, frames))
+        if key == "symmetry":
+            return self.report("Find Symmetry", symmetry_text(mol))
         if key in ("void_vol", "surface_area"):
             mol = self._snapshot()
         if key == "void_vol":

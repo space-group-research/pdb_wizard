@@ -118,6 +118,29 @@ def _is_mpmc_dummy_site(atom: Atom) -> bool:
     return atom.file_mass is not None and atom.file_mass < 0.5
 
 
+_SITE_MASS_TOLERANCE = 0.02  # amu
+
+
+def site_element(atom: Atom):
+    """The chemical element an atom really is, or None for a massless model site.
+
+    Sites of MPMC sorbate models are named after the model, not the element ('COG' and
+    'COE' are the carbon and oxygens of CO2, 'CHE' a methane hydrogen), so ``atom.element``,
+    which is read from the name, can be wrong for them. Their mass column is reliable: it
+    is matched to the periodic table here. Framework atoms, atoms without an MPMC mass,
+    and united-atom sites whose mass is no single element's keep ``atom.element``."""
+    if atom.file_mass is None or atom.mpmc_flag != "M":
+        return atom.element  # framework atoms are named after their element
+    if atom.file_mass < 0.5:
+        return None
+    from pdb_wizard.constants import ELEMENTS
+    best = min((el for el in ELEMENTS.values() if el.atomic_number > 0),
+               key=lambda el: abs(el.mass - atom.file_mass))
+    if abs(best.mass - atom.file_mass) <= _SITE_MASS_TOLERANCE:
+        return best
+    return atom.element
+
+
 def _mpmc_mass(atom: Atom) -> float:
     """Mass to write for a movable site: the file's own value when it came from
     MPMC (dummy sites are massless). Framework atoms keep element masses."""
@@ -1544,6 +1567,8 @@ def detect_filetype(filepath: str) -> str:
         return "mol2"
     if suffix == ".dcd":
         return "dcd"
+    if suffix == ".out":
+        return "crystal_out"
     raise ValueError(f"Unsupported file format: {suffix}")
 
 
@@ -1598,6 +1623,10 @@ def read_file(
         from pdb_wizard.formats import read_mol2
         with open(filepath) as f:
             system, pbc = read_mol2(f)
+    elif ft == "crystal_out":
+        from pdb_wizard.crystal import read_crystal_output
+        with open(filepath, errors="replace") as f:
+            system, pbc = read_crystal_output(f)
     elif ft == "dcd":
         raise ValueError(
             "DCD files are trajectories; open them with read_file_trajectory "
