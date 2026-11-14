@@ -23,7 +23,8 @@ jobs:
       - name: Install
         run: python -m pip install ".[viewer,test]"
       - name: Desktop GUI dependency
-        run: python -m pip install PySide6
+        # through the package's own extra, so its PySide6 version exclusions apply
+        run: python -m pip install ".[gui]"
       - name: Test
         env:
           PYTHONPATH: src  # test the checkout itself (some tests read build.py and src/)
