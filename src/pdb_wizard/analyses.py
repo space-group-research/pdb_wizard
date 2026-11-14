@@ -21,6 +21,7 @@ from pdb_wizard.density3d import compute_density_3d
 from pdb_wizard.density_profile import compute_density_profile, compute_density_profile_trajectory
 from pdb_wizard.gyration import compute_gyration_trajectory
 from pdb_wizard.hbonds import count_hbonds_trajectory, detect_hbonds
+from pdb_wizard.io import is_fallback_cell
 from pdb_wizard.isotherm import isotherm_log_table, parse_isotherm_results
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.msd import compute_diffusion_constant, compute_msd
@@ -98,6 +99,8 @@ def unavailable(key: str, mol: Optional[Molecule], frames: Optional[list]) -> Op
     needs a cell (the terminal viewer reports zeros without one).
     """
     n_frames = len(frames) if frames else 0
+    # A trajectory without cell data carries a huge stand-in box; it is not a cell.
+    no_cell = mol is None or mol.pbc is None or is_fallback_cell(mol.pbc)
     if key in ("energy_plot", "isotherm_plot", "db_search"):
         return None
     if key in ("msd", "rmsd") and n_frames < 3:
@@ -107,9 +110,9 @@ def unavailable(key: str, mol: Optional[Molecule], frames: Optional[list]) -> Op
     if key == "density3d":
         if n_frames < 2:
             return "Need a trajectory with PBC for 3D density"
-        if mol is None or mol.pbc is None:
+        if no_cell:
             return "Need PBC for 3D density map"
-    if key == "pxrd" and (mol is None or not mol.atoms or mol.pbc is None):
+    if key == "pxrd" and (mol is None or not mol.atoms or no_cell):
         return "Need a crystal structure with PBC for PXRD"
     if mol is None:
         return "No atoms loaded"
@@ -117,7 +120,7 @@ def unavailable(key: str, mol: Optional[Molecule], frames: Optional[list]) -> Op
         return None
     if not mol.atoms:
         return "No atoms loaded yet" if key == "rdf" else "No atoms loaded"
-    if mol.pbc is None:
+    if no_cell:
         need = {"surface_area": "Need PBC for surface area", "pore_size": "Need PBC for pore size",
                 "void_vol": "Need PBC for void volume"}
         if key in need:

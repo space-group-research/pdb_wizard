@@ -1898,7 +1898,13 @@ class ReduceCellScreen(ModalScreen[Optional[Molecule]]):
         nc = self.query_one("#rc-nc", SpinBox).value
         status = self.query_one("#rc-status", Label)
 
-        fw, sorbs = identify_framework_and_sorbates(self._molecule, na, nb, nc)
+        try:
+            fw, sorbs = identify_framework_and_sorbates(self._molecule, na, nb, nc)
+        except ValueError as e:  # not an na x nb x nc supercell
+            self._framework_idx, self._sorbate_mols, self._keep = [], [], []
+            self.query_one("#rc-table", DataTable).clear()
+            status.update(str(e))
+            return
         self._framework_idx = fw
         self._sorbate_mols = sorbs
         self._keep = [True] * len(sorbs)
@@ -1944,7 +1950,11 @@ class ReduceCellScreen(ModalScreen[Optional[Molecule]]):
         nb = self.query_one("#rc-nb", SpinBox).value
         nc = self.query_one("#rc-nc", SpinBox).value
         keep_indices = [i for i, k in enumerate(self._keep) if k]
-        result = reduce_to_primitive(self._molecule, na, nb, nc, keep_indices)
+        try:
+            result = reduce_to_primitive(self._molecule, na, nb, nc, keep_indices)
+        except ValueError as e:  # the sizes were changed after Analyze
+            self.query_one("#rc-status", Label).update(str(e))
+            return
         n_kept = len(keep_indices)
         n_total = len(self._sorbate_mols)
         self.app.notify(

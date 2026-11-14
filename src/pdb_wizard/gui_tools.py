@@ -956,7 +956,14 @@ class ReduceCellDialog(_QDialogT):
             self.status.setText("Reducing a supercell needs a periodic cell")
             self.reduce_button.setEnabled(False)
             return
-        self.framework, self.sorbates = identify_framework_and_sorbates(self.mol, na, nb, nc)
+        try:
+            self.framework, self.sorbates = identify_framework_and_sorbates(self.mol, na, nb, nc)
+        except ValueError as e:  # not an na x nb x nc supercell
+            self.framework, self.sorbates = [], []
+            self.table.setRowCount(0)
+            self.status.setText(str(e))
+            self.reduce_button.setEnabled(False)
+            return
         self.table.setRowCount(len(self.sorbates))
         for i, idx in enumerate(self.sorbates):
             counts: dict = {}
@@ -987,7 +994,12 @@ class ReduceCellDialog(_QDialogT):
         if not self.reduce_button.isEnabled() or (not self.framework and not self.sorbates):
             self.status.setText("Click Analyze first")
             return None
-        self.result_mol = reduce_to_primitive(self.mol, *self.sizes(), self.keep())
+        try:
+            self.result_mol = reduce_to_primitive(self.mol, *self.sizes(), self.keep())
+        except ValueError as e:
+            self.status.setText(str(e))
+            self.reduce_button.setEnabled(False)
+            return None
         self.accept()
         return self.result_mol
 
