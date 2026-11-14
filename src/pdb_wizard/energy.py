@@ -32,7 +32,7 @@ def read_energy_dat(filepath: str) -> dict[str, np.ndarray]:
         if stripped.startswith("#") or stripped.startswith("!"):
             # Parse header: "#step #energy #coulombic ..." or "# step energy ..."
             tokens = stripped.lstrip("#!").split()
-            if tokens:
+            if tokens and not header_names:  # later comment lines are not the header
                 header_names = [t.lstrip("#") for t in tokens]
             continue
         tokens = stripped.split()
@@ -44,6 +44,9 @@ def read_energy_dat(filepath: str) -> dict[str, np.ndarray]:
 
     if not data_lines:
         return {}
+
+    # MPMC flushes the file in blocks, so a running job's last line can be cut short.
+    data_lines = [row for row in data_lines if len(row) == len(data_lines[0])]
 
     arr = np.array(data_lines)
     n_cols = arr.shape[1]

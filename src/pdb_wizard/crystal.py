@@ -356,6 +356,15 @@ def crystal_lattice_line(number: int, cell: tuple) -> str:
 
 def crystal_geometry(mol: Molecule, reduction: Optional[SymmetryReduction] = None) -> str:
     """The geometry block, from ``CRYSTAL`` to the last atom (no END)."""
+    unknown = []
+    for atom in mol.atoms:
+        element = site_element(atom)  # None: a massless model site, left out by design
+        if element is not None and (element.symbol == "X" or element.atomic_number <= 0):
+            unknown.append(atom.name)
+    if unknown:
+        raise ValueError(
+            "A CRYSTAL input needs an atomic number for every atom; these atom names have "
+            f"no known element: {', '.join(sorted(set(unknown)))}")
     if reduction is None:
         if mol.pbc is None or is_fallback_cell(mol.pbc):
             raise ValueError("A CRYSTAL input needs a unit cell")

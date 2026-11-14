@@ -32,15 +32,18 @@ _BUNDLED_TEMPLATES: dict[str, str] = {}
 def load_template(name: str) -> str:
     """Load a template by filename (relative to templates/).
 
-    Prefers an on-disk file under TEMPLATES_DIR so editable installs can
-    customise the shipped templates. Falls back to _BUNDLED_TEMPLATES when
-    running from the amalgamated single-file dist.
+    Source installs read the on-disk file under TEMPLATES_DIR so editable installs can
+    customise the shipped templates. The amalgamated single-file dist uses only its
+    _BUNDLED_TEMPLATES: there TEMPLATES_DIR is whatever folder the file was copied to, and
+    an unrelated file of the same name must not be taken for a template.
     """
     p = TEMPLATES_DIR / name
+    if _BUNDLED_TEMPLATES:
+        if name in _BUNDLED_TEMPLATES:
+            return _BUNDLED_TEMPLATES[name]
+        raise FileNotFoundError(f"template not found: {name}")
     if p.is_file():
         return p.read_text()
-    if name in _BUNDLED_TEMPLATES:
-        return _BUNDLED_TEMPLATES[name]
     raise FileNotFoundError(f"template not found: {p}")
 
 

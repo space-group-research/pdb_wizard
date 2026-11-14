@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -494,7 +495,8 @@ def test_all_three_front_ends_write_the_same_input(tmp_path, request):
             await pilot.pause()
 
             async def wait(cond):
-                for _ in range(200):
+                deadline = time.monotonic() + 180  # wall-clock: CI runners are slow
+                while time.monotonic() < deadline:
                     await pilot.pause(0.05)
                     if cond():
                         return
@@ -503,8 +505,9 @@ def test_all_three_front_ends_write_the_same_input(tmp_path, request):
             app.on_operations_panel_run_command(SimpleNamespace(command="symmetry"))
             await wait(lambda: isinstance(app.screen, InfoModal))
             shown = app.screen.query_one("#info-text", TextArea).text
-            await pilot.click("#info-ok")
-            await wait(lambda: not isinstance(app.screen, InfoModal))
+            while isinstance(app.screen, InfoModal):  # a click can be lost under load
+                await pilot.click("#info-ok")
+                await pilot.pause(0.2)
             for answer in ("231", "225"):
                 app.on_operations_panel_run_command(SimpleNamespace(command="write_crystal"))
                 await wait(lambda: isinstance(app.screen, InputModal))

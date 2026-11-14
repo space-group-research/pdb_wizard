@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 
-from pdb_wizard.atom import Atom
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.pbc import PBC
+
+# Two movable molecules whose sites all coincide within this (A) once folded into the
+# small cell are periodic copies of one molecule.
+_REDUCE_COPY_TOL = 0.05
 
 
 def identify_framework_and_sorbates(
@@ -66,10 +71,14 @@ def identify_framework_and_sorbates(
     np.zeros(n_atoms, dtype=bool)
     groups: list[list[int]] = []
 
-    # Group by element first to reduce O(n^2) comparisons
+    # Group by element first to reduce O(n^2) comparisons. Movable (M) molecules are
+    # sorbates by definition and are handled below: their sites can sit within the
+    # tolerance of each other (PHAHST H2, the CON/COE sites of CO2) and would otherwise
+    # be mistaken for periodic copies of one framework atom.
     elem_indices: dict[str, list[int]] = {}
     for i, a in enumerate(mol.atoms):
-        elem_indices.setdefault(a.element.symbol, []).append(i)
+        if a.mpmc_flag != "M":
+            elem_indices.setdefault(a.element.symbol, []).append(i)
 
     for el, indices in elem_indices.items():
         el_used = set()
@@ -103,6 +112,14 @@ def identify_framework_and_sorbates(
         else:
             sorbate_groups.append(group)
 
+    n_frozen = sum(len(indices) for indices in elem_indices.values())
+    n_periodic = n_mult * len(framework_indices)
+    if n_mult > 1 and n_frozen and 2 * n_periodic < n_frozen:
+        raise ValueError(
+            f"this is not a {na} x {nb} x {nc} supercell: only {n_periodic} of its "
+            f"{n_frozen} framework atoms repeat {n_mult} times under the sub-cell "
+            f"translations. Check the numbers of cells along a, b and c.")
+
     # Merge sorbate atoms into molecules using bond connectivity
     # Build neighbor map from existing bonds
     neighbors: dict[int, set[int]] = {}
@@ -135,6 +152,29 @@ def identify_framework_and_sorbates(
                         queue.append(nb_idx)
             if mol_atoms:
                 sorbate_molecules.append(sorted(mol_atoms))
+
+    # Movable molecules, one entry per molecule id. Periodic copies of the same
+    # molecule (a supercell made with Extend Axis after the sorbates were added) land
+    # on top of each other in the small cell: keep the first of each.
+    movable: dict = {}
+    for i, a in enumerate(mol.atoms):
+        if a.mpmc_flag == "M":
+            movable.setdefault(a.mpmc_mol if a.mpmc_mol is not None else ("atom", i), []).append(i)
+    kept: list[list[int]] = []
+    for indices in movable.values():
+        duplicate = False
+        for other in kept:
+            if len(other) != len(indices):
+                continue
+            diff = (prim_cart[indices] - prim_cart[other]) @ prim_inv
+            diff -= np.round(diff)
+            if (np.linalg.norm(diff @ prim_basis, axis=1) < _REDUCE_COPY_TOL).all() and all(
+                    mol.atoms[i].name == mol.atoms[j].name for i, j in zip(indices, other)):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(indices)
+    sorbate_molecules.extend(kept)
 
     return framework_indices, sorbate_molecules
 
@@ -182,18 +222,32 @@ def reduce_to_primitive(
 
     # Build new atom list with positions wrapped into primitive cell
     prim_basis = prim_pbc.basis_matrix
+    prim_recip = prim_pbc.reciprocal_basis_matrix
+    # A movable molecule moves as a whole (by the lattice vector that brings its first
+    # site into the cell), so it stays the rigid model MPMC expects.
+    first_site: dict = {}
+    for sm in sorbate_mols:
+        if all(mol.atoms[i].mpmc_flag == "M" for i in sm):
+            for i in sm:
+                first_site[i] = sm[0]
     new_atoms = []
     for idx in sorted(keep_atoms):
         a = mol.atoms[idx]
-        # Convert to fractional in primitive cell
-        frac = a.x @ prim_pbc.reciprocal_basis_matrix
-        frac -= np.floor(frac)
+        if idx in first_site:
+            origin = mol.atoms[first_site[idx]].x
+            rel = (a.x - origin) @ prim_recip
+            rel -= np.round(rel)
+            frac = origin @ prim_recip
+            frac = frac - np.floor(frac) + rel
+        else:
+            # Convert to fractional in primitive cell
+            frac = a.x @ prim_recip
+            frac -= np.floor(frac)
         new_pos = frac @ prim_basis
-        new_atom = Atom(float(new_pos[0]), float(new_pos[1]), float(new_pos[2]), a.name)
-        new_atom.charge = a.charge
-        new_atom.alpha = a.alpha
-        new_atom.epsilon = a.epsilon
-        new_atom.sigma = a.sigma
+        # a full copy: charge and LJ parameters, and also C6/C8/C10, the movable flag,
+        # molecule id, residue name and model mass
+        new_atom = copy.deepcopy(a)
+        new_atom.x = np.array([float(new_pos[0]), float(new_pos[1]), float(new_pos[2])])
         new_atoms.append(new_atom)
 
     result = Molecule(atoms=new_atoms, pbc=prim_pbc)

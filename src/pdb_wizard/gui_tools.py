@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import threading
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
@@ -47,6 +48,7 @@ from pdb_wizard.inputgen import (
     generate_engine_inputs,
     parse_form_value,
 )
+from pdb_wizard.io import is_fallback_cell
 from pdb_wizard.molecule import Molecule, set_atom_ids
 from pdb_wizard.reduce_cell import identify_framework_and_sorbates, reduce_to_primitive
 from pdb_wizard.sorbates import SORBATE_MODELS
@@ -67,6 +69,12 @@ else:  # keeps the module importable without Qt
 _PLOT_COLORS = [(61, 174, 233), (255, 130, 60)]
 
 
+def _gui_real_cell(mol: Optional[Molecule]) -> bool:
+    """A cell that is really there: not None and not the 10^6 Å stand-in box that readers
+    give trajectories without cell data."""
+    return mol is not None and mol.pbc is not None and not is_fallback_cell(mol.pbc)
+
+
 def _mono_font():
     return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
 
@@ -82,11 +90,13 @@ class GuiTask:
     task has finished and its callback has run (for scripts and tests).
     """
 
-    _pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     _live: set = set()  # running tasks stay referenced, so a second task never drops the first
 
     def __init__(self, fn: Callable, on_done: Callable, on_error: Callable) -> None:
-        self._future = self._pool.submit(fn)
+        # one daemon thread per task: a slow task (a dead network, a big trajectory) neither
+        # holds up the next one nor keeps the process alive after the window is closed
+        self._future: concurrent.futures.Future = concurrent.futures.Future()
+        threading.Thread(target=self._work, args=(fn,), daemon=True).start()
         self._on_done, self._on_error = on_done, on_error
         self.finished = False
         GuiTask._live.add(self)
@@ -94,6 +104,14 @@ class GuiTask:
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._poll)
         self._timer.start()
+
+    def _work(self, fn: Callable) -> None:
+        try:
+            result = fn()
+        except BaseException as e:  # SystemExit too: _poll hands it to on_error
+            self._future.set_exception(e)
+        else:
+            self._future.set_result(result)
 
     def detach(self) -> None:
         """Drop the callbacks (their window is closing); the work finishes unseen."""
@@ -107,8 +125,8 @@ class GuiTask:
         GuiTask._live.discard(self)
         try:
             result = self._future.result()
-        except Exception as e:  # reported to the user by on_error
-            callback, arg = self._on_error, e
+        except BaseException as e:  # reported to the user by on_error; a worker that
+            callback, arg = self._on_error, e  # calls sys.exit() must not end the GUI
         else:
             callback, arg = self._on_done, result
         try:
@@ -938,7 +956,14 @@ class ReduceCellDialog(_QDialogT):
             self.status.setText("Reducing a supercell needs a periodic cell")
             self.reduce_button.setEnabled(False)
             return
-        self.framework, self.sorbates = identify_framework_and_sorbates(self.mol, na, nb, nc)
+        try:
+            self.framework, self.sorbates = identify_framework_and_sorbates(self.mol, na, nb, nc)
+        except ValueError as e:  # not an na x nb x nc supercell
+            self.framework, self.sorbates = [], []
+            self.table.setRowCount(0)
+            self.status.setText(str(e))
+            self.reduce_button.setEnabled(False)
+            return
         self.table.setRowCount(len(self.sorbates))
         for i, idx in enumerate(self.sorbates):
             counts: dict = {}
@@ -969,7 +994,12 @@ class ReduceCellDialog(_QDialogT):
         if not self.reduce_button.isEnabled() or (not self.framework and not self.sorbates):
             self.status.setText("Click Analyze first")
             return None
-        self.result_mol = reduce_to_primitive(self.mol, *self.sizes(), self.keep())
+        try:
+            self.result_mol = reduce_to_primitive(self.mol, *self.sizes(), self.keep())
+        except ValueError as e:
+            self.status.setText(str(e))
+            self.reduce_button.setEnabled(False)
+            return None
         self.accept()
         return self.result_mol
 
@@ -1119,8 +1149,17 @@ class InputGeneratorDialog(_QDialogT):
             self.preview.setPlainText(outcome.preview)
         self.status.setText(outcome.status)
 
+    def _engine_mol(self) -> Molecule:
+        """The structure the engines see: the stand-in cell of a cell-less trajectory is
+        handed over as no cell, so they refuse it as they refuse a structure without one."""
+        mol = self.mol
+        if mol is not None and mol.pbc is not None and not _gui_real_cell(mol):
+            mol = copy.copy(mol)
+            mol.pbc = None
+        return mol
+
     def validate(self) -> None:
-        self._show(check_engine(self.mol, self.engine, self.values(strict=False)))
+        self._show(check_engine(self._engine_mol(), self.engine, self.values(strict=False)))
 
     def show_template(self) -> None:
         self._show(engine_template_text(self.engine))
@@ -1131,7 +1170,7 @@ class InputGeneratorDialog(_QDialogT):
         except (ValueError, KeyError) as e:
             self.status.setText(f"Invalid input: {e}")
             return None
-        outcome = generate_engine_inputs(self.mol, self.engine, values,
+        outcome = generate_engine_inputs(self._engine_mol(), self.engine, values,
                                          self.outdir.text().strip())
         self._show(outcome)
         return outcome
@@ -1202,6 +1241,11 @@ class DatabaseDialog(_QDialogT):
         if self.task is not None:
             self.task.detach()
         super().closeEvent(event)
+
+    def reject(self) -> None:  # Esc does not send a close event
+        if self.task is not None:
+            self.task.detach()
+        super().reject()
 
     def _source_changed(self) -> None:
         current = self.mode.currentData()
@@ -1292,9 +1336,12 @@ class DatabaseDialog(_QDialogT):
 
         def done(path: str) -> None:
             try:
-                self.on_fetched(path, spec["label"], rid)
+                opened = self.on_fetched(path, spec["label"], rid)
             except Exception as e:  # e.g. a download that is not a readable structure
                 self.status.setText(f"Error opening {rid}: {e}")
+                return
+            if opened is False:  # the callback reported the problem itself
+                self.status.setText(f"Could not open {spec['label']} {rid}")
                 return
             self.accept()
 

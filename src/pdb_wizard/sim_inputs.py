@@ -21,7 +21,7 @@ try:  # Literal moved into typing in 3.8; typing_extensions backports it for 3.7
 except ImportError:  # pragma: no cover - exercised only on Python 3.7
     from typing_extensions import Literal
 
-from pdb_wizard.io import write_standard_pdb
+from pdb_wizard.io import site_element, write_standard_pdb
 from pdb_wizard.molecule import Molecule
 from pdb_wizard.templates import load_template, render
 
@@ -131,8 +131,20 @@ def generate_openmm_script(
 CP2KMode = Literal["cell_opt", "dft_md"]
 
 
+def _cp2k_atoms(mol: Molecule) -> list:
+    """(symbol, atom) for the real atoms. Sites of MPMC sorbate models get their true
+    element ('COG' is carbon, not cobalt) and massless sites are left out: CP2K needs
+    atoms, not model sites."""
+    out = []
+    for atom in mol.atoms:
+        element = site_element(atom)
+        if element is not None:
+            out.append((element.symbol, atom))
+    return out
+
+
 def _formula_summary(mol: Molecule) -> str:
-    counts = Counter(a.element.symbol for a in mol.atoms)
+    counts = Counter(symbol for symbol, _ in _cp2k_atoms(mol))
     return "".join(f"{el}{n}" if n > 1 else el for el, n in sorted(counts.items()))
 
 
@@ -160,15 +172,16 @@ def _kind_section(symbol: str, basis: str = "DZVP-MOLOPT-SR-GTH",
 
 
 def _build_kind_blocks(mol: Molecule) -> str:
-    elements_present = sorted({a.element.symbol for a in mol.atoms})
+    elements_present = sorted({symbol for symbol, _ in _cp2k_atoms(mol)})
     return "".join(_kind_section(el) for el in elements_present)
 
 
 def _write_xyz(mol: Molecule, path: Path) -> None:
-    lines = [str(len(mol.atoms)), f"{_formula_summary(mol)} from pdb_wizard"]
-    for a in mol.atoms:
+    atoms = _cp2k_atoms(mol)
+    lines = [str(len(atoms)), f"{_formula_summary(mol)} from pdb_wizard"]
+    for symbol, a in atoms:
         lines.append(
-            f"{a.element.symbol}  {a.x[0]:.6f}  {a.x[1]:.6f}  {a.x[2]:.6f}"
+            f"{symbol}  {a.x[0]:.6f}  {a.x[1]:.6f}  {a.x[2]:.6f}"
         )
     path.write_text("\n".join(lines) + "\n")
 
@@ -255,5 +268,5 @@ def generate_cp2k_input(
         "xyz": str(xyz_path),
         "mode": mode,
         "project": project_name,
-        "elements": sorted({a.element.symbol for a in mol.atoms}),
+        "elements": sorted({symbol for symbol, _ in _cp2k_atoms(mol)}),
     }

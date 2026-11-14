@@ -17,6 +17,14 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 
+def _stdin_is_terminal() -> bool:
+    """False when input is piped or redirected (a script is driving the program)."""
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, ValueError):  # stdin closed or replaced
+        return False
+
+
 def _ensure_installed(package: str, import_name: str | None = None) -> bool:
     """Try to import a package; if missing, offer to pip install it."""
     import_name = import_name or package
@@ -25,6 +33,9 @@ def _ensure_installed(package: str, import_name: str | None = None) -> bool:
         return True
     except ImportError:
         pass
+    if not _stdin_is_terminal():
+        # Never ask a script: the question would swallow its first line of input.
+        return False
     print(f"'{package}' is not installed.")
     try:
         answer = input("Install it now with pip? [Y/n] ").strip().lower()
@@ -49,11 +60,43 @@ def _check_file(filepath: str) -> None:
 
 def _read_or_exit(filepath: str):
     """read_file with a clean one-line error instead of a traceback."""
+    from pdb_wizard.checks import load_notes
     from pdb_wizard.io import read_file
     try:
-        return read_file(filepath)
+        mol = read_file(filepath)
     except (ValueError, OSError) as e:
         print(f"Error: could not read {filepath}: {e}", file=sys.stderr)
+        sys.exit(1)
+    for note in load_notes(mol):  # e.g. a CIF read as its asymmetric unit only
+        print(f"Warning: {note}", file=sys.stderr)
+    return mol
+
+
+def _read_trajectory_or_exit(filepath: str):
+    """read_file_trajectory with a clean one-line error instead of a traceback."""
+    from pdb_wizard.io import read_file_trajectory
+    try:
+        return read_file_trajectory(filepath)
+    except (ValueError, OSError) as e:
+        print(f"Error: could not read {filepath}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _batch_element(symbol: str | None) -> str | None:
+    """An element symbol as the structure stores it: 'o' and 'CU' mean O and Cu."""
+    from pdb_wizard.constants import ELEMENTS
+    if symbol and symbol.strip().capitalize() in ELEMENTS:
+        return symbol.strip().capitalize()
+    return symbol
+
+
+def _save_csv_or_exit(csv_path: str, columns, header: str) -> None:
+    import numpy as np
+    try:
+        np.savetxt(csv_path, np.column_stack(columns), header=header, delimiter=",",
+                   comments="")
+    except OSError as e:
+        print(f"Error: could not write {csv_path}: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -81,10 +124,10 @@ def _warn_fallback_cell(frames) -> None:
 def _batch_rdf(filepath: str, element1: str, element2: str, csv_path: str | None) -> None:
     """Compute RDF and optionally write CSV."""
     _check_file(filepath)
-    from pdb_wizard.io import read_file_trajectory
     from pdb_wizard.rdf import compute_rdf, compute_rdf_trajectory
 
-    frames = read_file_trajectory(filepath)
+    element1, element2 = _batch_element(element1), _batch_element(element2)
+    frames = _read_trajectory_or_exit(filepath)
     _warn_fallback_cell(frames)
     if frames is not None:
         r, g = compute_rdf_trajectory(frames, element1, element2)
@@ -98,9 +141,7 @@ def _batch_rdf(filepath: str, element1: str, element2: str, csv_path: str | None
         sys.exit(1)
 
     if csv_path:
-        import numpy as np
-        np.savetxt(csv_path, np.column_stack([r, g]),
-                   header="r(A),g(r)", delimiter=",", comments="")
+        _save_csv_or_exit(csv_path, [r, g], "r(A),g(r)")
         print(f"RDF written to {csv_path}")
     else:
         for ri, gi in zip(r, g):
@@ -110,10 +151,10 @@ def _batch_rdf(filepath: str, element1: str, element2: str, csv_path: str | None
 def _batch_msd(filepath: str, element: str | None, csv_path: str | None) -> None:
     """Compute MSD and optionally write CSV."""
     _check_file(filepath)
-    from pdb_wizard.io import read_file_trajectory
     from pdb_wizard.msd import compute_msd
 
-    frames = read_file_trajectory(filepath)
+    element = _batch_element(element)
+    frames = _read_trajectory_or_exit(filepath)
     if frames is None:
         print("MSD requires a trajectory file with multiple frames.",
               file=sys.stderr)
@@ -131,9 +172,7 @@ def _batch_msd(filepath: str, element: str | None, csv_path: str | None) -> None
         sys.exit(1)
 
     if csv_path:
-        import numpy as np
-        np.savetxt(csv_path, np.column_stack([lags, msd]),
-                   header="lag(frames),MSD(A^2)", delimiter=",", comments="")
+        _save_csv_or_exit(csv_path, [lags, msd], "lag(frames),MSD(A^2)")
         print(f"MSD written to {csv_path}")
     else:
         for li, mi in zip(lags, msd):
@@ -165,6 +204,16 @@ def _batch_convert(filepath: str, output: str) -> None:
         print(f"Unsupported output format: {suffix}", file=sys.stderr)
         sys.exit(1)
 
+    n_frames = _trajectory_frame_count(filepath)
+    if n_frames > 1 and os.path.exists(output) and os.path.samefile(filepath, output):
+        print(
+            f"Error: {filepath} is a trajectory of {n_frames} frames and --convert writes only "
+            "the first; writing it onto itself would lose the rest. Choose another output "
+            "file.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     mol = _read_or_exit(filepath)
 
     if suffix in _CELL_REQUIRED_SUFFIXES and mol.pbc is None:
@@ -175,28 +224,68 @@ def _batch_convert(filepath: str, output: str) -> None:
         )
         sys.exit(1)
 
-    if os.path.exists(output):
+    if not mol.atoms and suffix != ".xyz":  # .xyz has always written a 0-atom file
+        print(f"Error: could not write {output}: the structure has no atoms", file=sys.stderr)
+        sys.exit(1)
+
+    existed = os.path.exists(output)
+    if existed:
         print(f"Warning: overwriting existing file {output}", file=sys.stderr)
 
-    if suffix == ".pqr":
-        write_mpmc_pdb(mol, output)
-    else:
-        with open(output, "w") as out:
-            if suffix == ".xyz":
-                write_xyz(mol, out)
-            elif suffix in (".pdb", ".ent"):
-                write_standard_pdb(mol, out, skip_mols_step=True)
-            elif suffix == ".cif":
-                from pdb_wizard.formats import write_cif
-                write_cif(mol, out)
-            elif suffix in (".vasp", ".poscar"):
-                from pdb_wizard.formats import write_poscar
-                write_poscar(mol, out)
-            else:
-                from pdb_wizard.formats import write_lammps_data
-                write_lammps_data(mol, out)
+    try:
+        if suffix == ".pqr":
+            write_mpmc_pdb(mol, output)
+        else:
+            with open(output, "w") as out:
+                if suffix == ".xyz":
+                    write_xyz(mol, out)
+                elif suffix in (".pdb", ".ent"):
+                    write_standard_pdb(mol, out, skip_mols_step=True)
+                elif suffix == ".cif":
+                    from pdb_wizard.formats import write_cif
+                    write_cif(mol, out)
+                elif suffix in (".vasp", ".poscar"):
+                    from pdb_wizard.formats import write_poscar
+                    write_poscar(mol, out)
+                else:
+                    from pdb_wizard.formats import write_lammps_data
+                    write_lammps_data(mol, out)
+    except (OSError, ValueError, IndexError) as e:
+        # e.g. a missing folder, or a structure with no atoms: no half-written file is left
+        if not existed and os.path.isfile(output):
+            os.remove(output)
+        reason = str(e) if isinstance(e, OSError) or mol.atoms else "the structure has no atoms"
+        print(f"Error: could not write {output}: {reason}", file=sys.stderr)
+        sys.exit(1)
 
+    if n_frames > 1:
+        print(
+            f"Warning: {filepath} has {n_frames} frames; only the first was converted.",
+            file=sys.stderr,
+        )
     print(f"Converted {filepath} -> {output}")
+
+
+def _trajectory_frame_count(filepath: str) -> int:
+    """Frames in a multi-frame PDB or XYZ file (1 for anything else)."""
+    from pdb_wizard.io import (
+        check_pdb_trajectory,
+        check_xyz_trajectory,
+        detect_filetype,
+        read_pdb_trajectory,
+        read_xyz_trajectory,
+    )
+    try:
+        kind = detect_filetype(filepath)
+        if kind == "xyz" and check_xyz_trajectory(filepath):
+            with open(filepath) as f:
+                return max(len(read_xyz_trajectory(f)[0]), 1)
+        if kind == "pdb" and check_pdb_trajectory(filepath):
+            with open(filepath) as f:
+                return max(len(read_pdb_trajectory(f)[0]), 1)
+    except (OSError, ValueError, IndexError, SystemExit):
+        pass
+    return 1
 
 
 def _batch_surface(filepath: str) -> None:
@@ -373,6 +462,17 @@ def main() -> None:
                 ft = detect_filetype(args.file)
             except ValueError as e:
                 parser.error(str(e))
+            if not _stdin_is_terminal():
+                # A script is piping answers in (as into the original pdb_wizard.py): the
+                # viewer cannot run on a pipe, so the classic menu reads them.
+                print(
+                    "Input is not a terminal — falling back to the classic text menu "
+                    "(use --classic to select it directly).",
+                    file=sys.stderr,
+                )
+                from pdb_wizard.menu import run_classic
+                run_classic(args.file)
+                return
             is_traj = False
             if ft == "pdb":
                 is_traj = check_pdb_trajectory(args.file)

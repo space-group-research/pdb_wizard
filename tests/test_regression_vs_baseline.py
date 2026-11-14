@@ -1,7 +1,8 @@
 """Differential regression tests: this pdb_wizard.py against a baseline version.
 
 Both modules are loaded side by side and run over the same structures. Results must
-match exactly, except for the changes the insert/round-trip work makes on purpose:
+match exactly, except for the changes the insert/round-trip work makes on purpose (and
+the three writer bugs listed in test_other_writers_are_unchanged):
 
   * MPMC box remarks are written ``REMARK BOX BASIS[i] = ...`` (MPMC needs the '=')
   * the BOX pseudo-molecule gets the ID after the last movable molecule
@@ -309,7 +310,170 @@ def test_other_writers_are_unchanged(bw, structure, fmt):
             outs.append(buf.getvalue())
         except Exception as e:
             outs.append(type(e).__name__)
-    assert outs[1] == outs[0]
+    old, new = outs
+    if new == old:
+        return
+    # Three bugs fixed on purpose (io bug hunt, 2026-11) change what these writers give for
+    # some structures. Each case below asserts the corrected relationship to the baseline;
+    # everything else must still be equal.
+    massless = _massless_sites(p)
+    if fmt in ("xyz", "pdb", "cif"):
+        # Bug: massless MPMC model sites (water M, H2 centre) were written as atoms of
+        # element X. They are left out now. Only structures that have such sites may differ,
+        # and only by those sites.
+        assert massless, "no massless model sites: the output must not change"
+        expected = {"xyz": _xyz_without, "pdb": _pdb_without, "cif": _cif_without}[fmt]
+        assert new == expected(old, new, b, massless)
+    elif fmt == "poscar":
+        # Bug: the positions were written in structure order under species counts grouped
+        # by element, so VASP gave atoms the wrong element unless the structure happened to
+        # be sorted. They are grouped by species now (and massless sites are left out).
+        symbols = [a.element.symbol for a in b.atoms]
+        assert massless or not _grouped(symbols), "already grouped: the output must not change"
+        _assert_same_poscar_content(old, new, symbols, massless)
+    else:
+        # Bug: every cell was written as an orthogonal box a x b x c. A non-orthogonal cell
+        # now gets LAMMPS's triclinic box and tilt line (and massless sites are left out).
+        angles = cell(p)[3:] if p.pbc is not None else (90.0, 90.0, 90.0)
+        skewed = any(abs(v - 90.0) > 1e-9 for v in angles)
+        assert skewed or massless, "orthogonal, no model sites: the output must not change"
+        _assert_same_lammps_content(old, new, cell(p), skewed, massless)
+
+
+def _massless_sites(mol):
+    """Indices of the massless model sites of movable MPMC molecules."""
+    return [
+        i
+        for i, a in enumerate(mol.atoms)
+        if getattr(a, "mpmc_flag", None) == "M"
+        and getattr(a, "file_mass", None) is not None
+        and a.file_mass < 0.5
+    ]
+
+
+def _grouped(symbols):
+    """True if every element's atoms are consecutive (the only case the old POSCAR was right)."""
+    seen, last = set(), None
+    for s in symbols:
+        if s != last and s in seen:
+            return False
+        seen.add(s)
+        last = s
+    return True
+
+
+def _xyz_without(old, new, mol, massless):
+    """The baseline XYZ with the massless sites' lines removed and the count lowered."""
+    lines = old.splitlines(True)
+    keep = [ln for i, ln in enumerate(lines[2:]) if i not in set(massless)]
+    return f"{len(keep)}{lines[0][len(lines[0].rstrip()):]}" + lines[1] + "".join(keep)
+
+
+def _cif_without(old, new, mol, massless):
+    """The baseline CIF with the massless sites' rows (one row per atom, in order) removed."""
+    lines = old.splitlines(True)
+    first = max(i for i, ln in enumerate(lines) if ln.startswith("_atom_site_")) + 1
+    return "".join(lines[:first]) + "".join(
+        ln for i, ln in enumerate(lines[first:]) if i not in set(massless)
+    )
+
+
+def _pdb_without(old, new, mol, massless):
+    """The baseline PDB with the massless sites' records removed and the serials closed up.
+
+    A residue that lost its massless site may also change its name: the writer names a
+    molecule by its elements, and a four-site water (H, H, O plus the M site) only matches
+    its H/H/O entry, HOH, once the M site is gone. Before, it was UNK. That one change of
+    name is allowed; any other residue name must stay.
+    """
+    wanted = {tuple(f"{v:8.3f}" for v in mol.atoms[i].x) for i in massless}
+    out, serial, touched = [], 0, set()
+    for ln in old.splitlines(True):
+        if not ln.startswith("HETATM"):
+            out.append(ln)
+            continue
+        if ln[76:78].strip() == "X" and (ln[30:38], ln[38:46], ln[46:54]) in wanted:
+            touched.add(ln[22:26])
+            continue
+        serial += 1
+        out.append(f"HETATM{serial:>5}" + ln[11:])
+    assert len(touched) and serial == len(mol.atoms) - len(massless)
+    new_lines = new.splitlines(True)
+    for k, ln in enumerate(out):
+        if ln.startswith("HETATM") and ln[22:26] in touched:
+            elements = sorted(
+                o[76:78].strip() for o in out if o.startswith("HETATM") and o[22:26] == ln[22:26]
+            )
+            name = "HOH" if elements == ["H", "H", "O"] else ln[17:20]
+            assert new_lines[k][17:20] == name
+            out[k] = ln[:17] + name + ln[20:]
+    return "".join(out)
+
+
+def _poscar_parts(text):
+    lines = text.splitlines()
+    species, counts = lines[5].split(), [int(v) for v in lines[6].split()]
+    return lines[:5], dict(zip(species, counts)), lines[7], lines[8:]
+
+
+def _assert_same_poscar_content(old, new, symbols, massless):
+    """Same lattice, same species counts and the same (element, position) pairs. The
+    element of a baseline position is the one of its atom in the structure (that is what
+    the baseline meant); in the new file it is the one VASP assigns: the first N1 positions
+    to the first species, the next N2 to the second."""
+    head_old, counts_old, mode_old, pos_old = _poscar_parts(old)
+    head_new, counts_new, mode_new, pos_new = _poscar_parts(new)
+    assert head_new == head_old and mode_new == mode_old
+    gone = set(massless)
+    kept = [(s, ln) for i, (s, ln) in enumerate(zip(symbols, pos_old)) if i not in gone]
+    for i in gone:
+        counts_old[symbols[i]] -= 1
+    assert counts_new == {s: n for s, n in counts_old.items() if n}
+    assigned = [s for s, n in counts_new.items() for _ in range(n)]
+    assert len(assigned) == len(pos_new)
+    assert sorted(zip(assigned, pos_new)) == sorted(kept)
+    assert _grouped(assigned)
+
+
+def _lammps_parts(text):
+    head, rest = text.split("\nMasses\n", 1)
+    masses, rest = rest.split("\nAtoms\n", 1)
+    atoms, _, bonds = rest.partition("\nBonds\n")
+    types = {ln.split()[0]: ln.split()[-1] for ln in masses.strip().splitlines()}
+    rows = [ln.split() for ln in atoms.strip().splitlines()]
+    box = [ln for ln in head.splitlines() if ln.endswith(("lo xhi", "lo yhi", "lo zhi", "yz"))]
+    other = [ln for ln in head.splitlines() if ln not in box]
+    return other, box, masses, rows, types, bonds
+
+
+def _assert_same_lammps_content(old, new, cellpar, skewed, massless):
+    """The box is the one LAMMPS defines for this cell (computed here from the cell
+    parameters: a = (lx, 0, 0), b = (xy, ly, 0), c = (xz, yz, lz)); the atom lines are the
+    baseline's, without the massless sites."""
+    o_head, o_box, o_masses, o_rows, o_types, o_bonds = _lammps_parts(old)
+    n_head, n_box, n_masses, n_rows, n_types, n_bonds = _lammps_parts(new)
+    a, b, c = cellpar[:3]
+    al, be, ga = np.radians(cellpar[3:])
+    lx, xy, ly = a, b * np.cos(ga), b * np.sin(ga)
+    xz = c * np.cos(be)
+    yz = (b * c * np.cos(al) - xy * xz) / ly
+    lz = np.sqrt(c * c - xz * xz - yz * yz)
+    want = [f"0.000000 {lx:.6f} xlo xhi", f"0.000000 {ly:.6f} ylo yhi",
+            f"0.000000 {lz:.6f} zlo zhi"]
+    if skewed:
+        want.append(f"{xy:.6f} {xz:.6f} {yz:.6f} xy xz yz".replace("-0.000000", "0.000000"))
+    assert [ln.replace("-0.000000", "0.000000") for ln in n_box] == want
+    if not skewed:
+        assert n_box == o_box
+    if not massless:  # only the box differs
+        assert (n_head, n_masses, n_rows, n_bonds) == (o_head, o_masses, o_rows, o_bonds)
+        return
+    # ids, molecule ids and type ids close up when sites go: compare what an atom line says
+    gone = set(massless)
+    kept = [r for i, r in enumerate(o_rows) if i not in gone]
+    assert len(n_rows) == len(kept)
+    assert [(n_types[r[2]], r[3:]) for r in n_rows] == [(o_types[r[2]], r[3:]) for r in kept]
+    assert [r[0] for r in n_rows] == [str(i + 1) for i in range(len(kept))]
 
 
 def test_mpmc_export_is_unchanged_for_frameworks(bw, structure):
@@ -336,6 +500,9 @@ def test_mpmc_export_is_unchanged_for_frameworks(bw, structure):
             if ln.startswith("ATOM") and " BOX " not in ln and ln.split()[4] == flag
         )
 
+    if rows(old, "M"):  # a baseline from after that fix: nothing may differ
+        assert new == old
+        return
     moved = [a for a in p.atoms if a.mpmc_flag == "M"]
     assert len(rows(new, "M")) == len(moved) > 0
     assert set(rows(new, "F")) <= set(rows(old, "F"))
@@ -436,6 +603,12 @@ def test_info_is_unchanged(bw, structure):
         with contextlib.redirect_stdout(buf):
             mod.print_info(mol, "x")
         outs.append(buf.getvalue())
+    # Intended difference: massless sites of a movable sorbate model (the M site of a
+    # 4-site water) are no longer counted as atoms of element X in the formula. Nothing
+    # else may differ, and only for structures that have such sites.
+    if any(a.mpmc_flag == "M" and a.file_mass is not None and a.file_mass < 0.5 for a in p.atoms):
+        outs[0] = re.sub(r"^X \d+\n", "", outs[0], flags=re.M)
+        assert "\nX " not in outs[1]
     assert outs[1] == outs[0]
 
 

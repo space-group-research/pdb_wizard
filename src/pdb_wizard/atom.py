@@ -12,7 +12,7 @@ from pdb_wizard.constants import DEFAULT_ELEMENT, ELEMENTS, Element
 class Atom:
     __slots__ = (
         "name", "_element", "x", "charge", "alpha", "epsilon",
-        "sigma", "c6", "c8", "c10", "id",
+        "sigma", "c6", "c8", "c10", "id", "omega", "gwp_alpha", "c9",
         "mpmc_flag", "mpmc_mol", "mpmc_res", "file_mass",
     )
 
@@ -40,6 +40,10 @@ class Atom:
         self.c6 = 0.0
         self.c8 = 0.0
         self.c10 = 0.0
+        # MPMC columns after sigma that the tool does not use but must not lose.
+        self.omega = 0.0
+        self.gwp_alpha = 0.0
+        self.c9 = 0.0
         self.id = 0
         # Set only when read from an MPMC file: F/M flag, molecule ID, residue
         # name and the mass column (dummy sites like M or LP are massless).

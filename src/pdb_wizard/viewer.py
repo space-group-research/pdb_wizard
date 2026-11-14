@@ -918,7 +918,7 @@ class ChargesFileModal(ModalScreen[Optional[dict]]):
         self._file_path = str(event.path)
         try:
             self._raw_lines = open(self._file_path).readlines()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             self._raw_lines = []
         self._update_preview()
 
@@ -1032,6 +1032,13 @@ class PlotWidget(Widget):
     def set_overlay(self, x: np.ndarray | None, y: np.ndarray | None,
                     color: str = "rgb(255,100,80)") -> None:
         """Set a second data series to overlay (e.g. experimental PXRD)."""
+        if x is not None and y is not None and len(x) == len(y) and len(x) > 1:
+            x, y = np.asarray(x), np.asarray(y)
+            if np.any(np.diff(x) < 0):
+                # The plot looks samples up by x, so they must ascend (a pattern may be
+                # stored from high to low angle).
+                order = np.argsort(x, kind="stable")
+                x, y = x[order], y[order]
         self._overlay_x = x
         self._overlay_y = y
         self._overlay_color = color
@@ -1114,6 +1121,9 @@ class PlotWidget(Widget):
                     y0, y1 = float(ydata[idx - 1]), float(ydata[idx])
                     t = (x_val - x0) / (x1 - x0) if x1 != x0 else 0
                     y_val = y0 + t * (y1 - y0)
+                if not np.isfinite(y_val):
+                    prev_py = None  # a gap: nothing drawn, and no line across it
+                    continue
                 py = int(px_h - 1 - (y_val - self._y_min) / y_range * (px_h - 1))
                 py = max(0, min(px_h - 1, py))
                 if prev_py is not None:
@@ -1352,13 +1362,13 @@ class RdfScreen(_AnalysisScreen):
         with Vertical():
             with Horizontal(id="rdf-row1"):
                 yield Label("Type 1:  El:")
-                yield Select(el_opts, value=el1, id="rdf-el1")
+                yield Select(el_opts, value=el1, id="rdf-el1", allow_blank=False)
                 yield Label("  Name:")
-                yield Select(name_opts1, value="(all)", id="rdf-name1")
+                yield Select(name_opts1, value="(all)", id="rdf-name1", allow_blank=False)
                 yield Label("    Type 2:  El:")
-                yield Select(el_opts, value=el2, id="rdf-el2")
+                yield Select(el_opts, value=el2, id="rdf-el2", allow_blank=False)
                 yield Label("  Name:")
-                yield Select(name_opts2, value="(all)", id="rdf-name2")
+                yield Select(name_opts2, value="(all)", id="rdf-name2", allow_blank=False)
             with Horizontal(id="rdf-row2"):
                 yield Label("Ymax:")
                 yield SpinBox(value=5, min_val=1, max_val=100, id="rdf-ymax")
@@ -1386,7 +1396,7 @@ class RdfScreen(_AnalysisScreen):
         elif bid == "rdf-csv":
             self._export_csv()
         elif bid == "rdf-close":
-            self.dismiss(None)
+            self.action_close()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         sid = event.select.id
@@ -1502,9 +1512,10 @@ class MsdScreen(_AnalysisScreen):
         with Vertical():
             with Horizontal(id="msd-controls"):
                 yield Label("Element:")
-                yield Select(el_opts, value=self._elements[-1] if self._elements else "H", id="msd-el")
+                yield Select(el_opts, value=self._elements[-1] if self._elements else "H",
+                             id="msd-el", allow_blank=False)
                 yield Label("Name:")
-                yield Select(name_opts, value="(all)", id="msd-name")
+                yield Select(name_opts, value="(all)", id="msd-name", allow_blank=False)
                 yield Button("Compute", id="msd-compute", variant="primary")
                 yield Button("CSV", id="msd-csv")
                 yield Button("Close", id="msd-close")
@@ -1523,7 +1534,7 @@ class MsdScreen(_AnalysisScreen):
         if event.button.id == "msd-compute":
             self._spawn_task(self._run_msd())
         elif event.button.id == "msd-close":
-            self.dismiss(None)
+            self.action_close()
         elif event.button.id == "msd-csv":
             if len(self._last_lags) == 0:
                 return
@@ -1574,9 +1585,9 @@ class CoordinationScreen(_AnalysisScreen):
         with Vertical():
             with Horizontal(id="coord-controls"):
                 yield Label("Center:")
-                yield Select(el_opts, value=el1, id="coord-el1")
+                yield Select(el_opts, value=el1, id="coord-el1", allow_blank=False)
                 yield Label("Neighbor:")
-                yield Select(el_opts, value=el2, id="coord-el2")
+                yield Select(el_opts, value=el2, id="coord-el2", allow_blank=False)
                 yield Label("Rmax:")
                 yield SpinBox(value=5, min_val=2, max_val=20, id="coord-rmax")
                 yield Button("Compute", id="coord-compute", variant="primary")
@@ -1593,7 +1604,7 @@ class CoordinationScreen(_AnalysisScreen):
         if event.button.id == "coord-compute":
             self._spawn_task(self._run_coord())
         elif event.button.id == "coord-close":
-            self.dismiss(None)
+            self.action_close()
         elif event.button.id == "coord-csv":
             if len(self._last_r) == 0:
                 return
@@ -1657,9 +1668,9 @@ class RmsdScreen(_AnalysisScreen):
         with Vertical():
             with Horizontal(id="rmsd-controls"):
                 yield Label("Element:")
-                yield Select(el_opts, value="(all)", id="rmsd-el")
+                yield Select(el_opts, value="(all)", id="rmsd-el", allow_blank=False)
                 yield Label("Name:")
-                yield Select(name_opts, value="(all)", id="rmsd-name")
+                yield Select(name_opts, value="(all)", id="rmsd-name", allow_blank=False)
                 yield Button("Compute", id="rmsd-compute", variant="primary")
                 yield Button("CSV", id="rmsd-csv")
                 yield Button("Close", id="rmsd-close")
@@ -1678,7 +1689,7 @@ class RmsdScreen(_AnalysisScreen):
         if event.button.id == "rmsd-compute":
             self._spawn_task(self._run_rmsd())
         elif event.button.id == "rmsd-close":
-            self.dismiss(None)
+            self.action_close()
         elif event.button.id == "rmsd-csv":
             if len(self._last_idx) == 0:
                 return
@@ -1741,7 +1752,7 @@ class HbondScreen(_AnalysisScreen):
         if event.button.id == "hb-compute":
             self._spawn_task(self._run())
         elif event.button.id == "hb-close":
-            self.dismiss(None)
+            self.action_close()
         elif event.button.id == "hb-csv":
             if len(self._last_idx) == 0:
                 return
@@ -1791,7 +1802,7 @@ class GyrationScreen(_AnalysisScreen):
         with Vertical():
             with Horizontal(id="rg-controls"):
                 yield Label("Element:")
-                yield Select(el_opts, value="(all)", id="rg-el")
+                yield Select(el_opts, value="(all)", id="rg-el", allow_blank=False)
                 yield Label("dt (ps):")
                 yield SpinBox(value=1, min_val=1, max_val=10000, id="rg-dt")
                 yield from self._yield_frame_range()
@@ -1805,7 +1816,7 @@ class GyrationScreen(_AnalysisScreen):
         if event.button.id == "rg-compute":
             self._spawn_task(self._run())
         elif event.button.id == "rg-close":
-            self.dismiss(None)
+            self.action_close()
         elif event.button.id == "rg-csv":
             if len(self._last_idx) == 0:
                 return
@@ -1887,7 +1898,13 @@ class ReduceCellScreen(ModalScreen[Optional[Molecule]]):
         nc = self.query_one("#rc-nc", SpinBox).value
         status = self.query_one("#rc-status", Label)
 
-        fw, sorbs = identify_framework_and_sorbates(self._molecule, na, nb, nc)
+        try:
+            fw, sorbs = identify_framework_and_sorbates(self._molecule, na, nb, nc)
+        except ValueError as e:  # not an na x nb x nc supercell
+            self._framework_idx, self._sorbate_mols, self._keep = [], [], []
+            self.query_one("#rc-table", DataTable).clear()
+            status.update(str(e))
+            return
         self._framework_idx = fw
         self._sorbate_mols = sorbs
         self._keep = [True] * len(sorbs)
@@ -1933,7 +1950,11 @@ class ReduceCellScreen(ModalScreen[Optional[Molecule]]):
         nb = self.query_one("#rc-nb", SpinBox).value
         nc = self.query_one("#rc-nc", SpinBox).value
         keep_indices = [i for i, k in enumerate(self._keep) if k]
-        result = reduce_to_primitive(self._molecule, na, nb, nc, keep_indices)
+        try:
+            result = reduce_to_primitive(self._molecule, na, nb, nc, keep_indices)
+        except ValueError as e:  # the sizes were changed after Analyze
+            self.query_one("#rc-status", Label).update(str(e))
+            return
         n_kept = len(keep_indices)
         n_total = len(self._sorbate_mols)
         self.app.notify(
@@ -2010,7 +2031,8 @@ class InputGeneratorScreen(ModalScreen[None]):
         with Vertical():
             with Horizontal(id="gen-row-engine"):
                 yield Label("Engine:")
-                yield Select(engine_opts, value=self._engine_key, id="gen-engine")
+                yield Select(engine_opts, value=self._engine_key, id="gen-engine",
+                             allow_blank=False)
                 yield Label("", id="gen-description")
                 yield Button("Close", id="gen-close")
             with Horizontal(id="gen-row-outdir"):
@@ -2075,6 +2097,7 @@ class InputGeneratorScreen(ModalScreen[None]):
                     [(c, c) for c in choices],
                     value=value if value in choices else (choices[0] if choices else ""),
                     id=widget_id,
+                    allow_blank=not choices,
                 )
             elif var.kind == "int":
                 widget = SpinBox(
@@ -2298,9 +2321,9 @@ class DatabaseSearchScreen(ModalScreen[None]):
         with Vertical():
             with Horizontal(id="db-row1"):
                 yield Label("Database:")
-                yield Select(db_opts, value=default_source, id="db-source")
+                yield Select(db_opts, value=default_source, id="db-source", allow_blank=False)
                 yield Label("Search by:")
-                yield Select(mode_opts, value=default_mode, id="db-mode")
+                yield Select(mode_opts, value=default_mode, id="db-mode", allow_blank=False)
                 yield Button("Close", id="db-close")
             with Horizontal(id="db-row2"):
                 yield Input(
@@ -2377,7 +2400,7 @@ class DatabaseSearchScreen(ModalScreen[None]):
         if bid == "db-search":
             self._spawn_task(self._do_search())
         elif bid == "db-close":
-            self.dismiss(None)
+            self.action_close()
         elif bid == "db-fetch":
             self._fetch_selected()
         elif bid == "db-fetch-id":
@@ -2468,7 +2491,9 @@ class DatabaseSearchScreen(ModalScreen[None]):
             from pdb_wizard.io import read_file
             load_msgs: list[str] = []
             mol = await asyncio.to_thread(read_file, path, True, load_msgs.append)
-            self.app.open_in_new_tab(mol, path)
+            # The download sits in a per-session cache that is deleted on exit. The tab
+            # keeps only the file name, so Save and Export default to the working directory.
+            self.app.open_in_new_tab(mol, Path(path).name)
             self.app.notify(
                 f"Opened {label} {rid} ({len(mol.atoms)} atoms)", timeout=3,
             )
@@ -2503,6 +2528,7 @@ class EnergyPlotScreen(_AnalysisScreen):
         self._molecule = None
         self._frames = None
         self._elements = []
+        self._compute_task = None
 
     def _n_steps(self) -> int:
         """Number of rows in the energy data."""
@@ -2522,7 +2548,8 @@ class EnergyPlotScreen(_AnalysisScreen):
         with Vertical():
             with Horizontal(id="energy-controls"):
                 yield Label("Column:")
-                yield Select(options, value=default, id="energy-col")
+                yield Select(options, value=default, id="energy-col",
+                             allow_blank=not options)
                 if n > 1:
                     yield Label("Start:")
                     yield SpinBox(value=1, min_val=1, max_val=n, id="energy-start")
@@ -2622,11 +2649,12 @@ class DensityScreen(_AnalysisScreen):
         with Vertical():
             with Horizontal(id="dens-controls"):
                 yield Label("Element:")
-                yield Select(el_opts, value=self._elements[0] if self._elements else "H", id="dens-el")
+                yield Select(el_opts, value=self._elements[0] if self._elements else "H",
+                             id="dens-el", allow_blank=False)
                 yield Label("Name:")
-                yield Select(name_opts, value="(all)", id="dens-name")
+                yield Select(name_opts, value="(all)", id="dens-name", allow_blank=False)
                 yield Label("Axis:")
-                yield Select(axis_opts, value="2", id="dens-axis")
+                yield Select(axis_opts, value="2", id="dens-axis", allow_blank=False)
                 if self._frames and len(self._frames) > 1:
                     yield Checkbox("Traj", value=True, id="dens-traj")
                 yield from self._yield_frame_range()
@@ -2644,7 +2672,7 @@ class DensityScreen(_AnalysisScreen):
         if event.button.id == "dens-compute":
             self._spawn_task(self._run_density())
         elif event.button.id == "dens-close":
-            self.dismiss(None)
+            self.action_close()
         elif event.button.id == "dens-csv":
             if len(self._last_pos) == 0:
                 return
@@ -2700,7 +2728,7 @@ class PxrdScreen(_AnalysisScreen):
         with Vertical():
             with Horizontal(id="pxrd-controls"):
                 yield Label("Source:")
-                yield Select(wl_opts, value="1.5406", id="pxrd-wl")
+                yield Select(wl_opts, value="1.5406", id="pxrd-wl", allow_blank=False)
                 yield Label("2T max:")
                 yield SpinBox(value=50, min_val=10, max_val=90, id="pxrd-ttmax")
                 yield Label("Width:")
@@ -2716,7 +2744,7 @@ class PxrdScreen(_AnalysisScreen):
         if event.button.id == "pxrd-compute":
             self._spawn_task(self._run_pxrd())
         elif event.button.id == "pxrd-close":
-            self.dismiss(None)
+            self.action_close()
         elif event.button.id == "pxrd-csv":
             if len(self._last_tt) == 0:
                 return
@@ -2810,6 +2838,7 @@ class MoleculeView(Widget):
         self._cached_strips: list[Strip] = []
         self._cached_size: tuple[int, int] = (0, 0)
         self._dragging = False
+        self._drag_moved = False
         self._drag_start_x = 0
         self._drag_start_y = 0
         self._locked_centroid = None
@@ -2823,6 +2852,7 @@ class MoleculeView(Widget):
         self._density_positions: np.ndarray | None = None
         self._density_values: np.ndarray | None = None
         self._density_element: str = ""
+        self._atom_count = 0  # of the structure last given to set_molecule
 
     class AtomPicked(Message):
         def __init__(self, atom_index: int, shift: bool) -> None:
@@ -2874,8 +2904,14 @@ class MoleculeView(Widget):
         self.capture_mouse()
 
     def on_mouse_up(self, event) -> None:
+        # A release can arrive without a press on this widget: the button went down on
+        # another widget or before the app was ready, or the terminal was left reporting
+        # the mouse by an earlier program. That is not a click here, so it is ignored.
+        if not self._dragging:
+            return
         was_drag = self._drag_moved
         self._dragging = False
+        self._drag_moved = False
         self.release_mouse()
         if not was_drag and self.measure_mode:
             # Only pick atoms in measure mode
@@ -2909,6 +2945,13 @@ class MoleculeView(Widget):
         self._invalidate_cache()
 
     def set_molecule(self, molecule: Molecule, keep_camera: bool = False) -> None:
+        n = len(molecule.atoms)
+        if n != self._atom_count:
+            # Another frame or an edit changed the atom count: indices picked before no
+            # longer name the same atoms (or any atom).
+            self._picked_atoms = []
+            self.highlighted_atoms = {i for i in self.highlighted_atoms if i < n}
+            self._atom_count = n
         self.molecule = molecule
         self.pbc = molecule.pbc
         if not keep_camera:
@@ -3024,7 +3067,8 @@ class MoleculeView(Widget):
         if self.show_atom_numbers and self.molecule is not None:
             fov = 1.5
             scale = min(px_w, px_h) / 2
-            centroid = self.molecule.center()
+            centroid = (self._locked_centroid if self._locked_centroid is not None
+                        else self.molecule.center())
             label_style = Style(
                 color="rgb(255,255,0)" if self.dark_bg else "rgb(0,0,180)",
                 bgcolor=f"rgb({bg[0]},{bg[1]},{bg[2]})",
@@ -3203,6 +3247,14 @@ class MoleculeView(Widget):
         self._cached_strips = strips
 
 
+def _mpmc_wizard_molecule(app):
+    """The molecule the MPMC export wizard was started for. The wizard runs across several
+    dialogs and a background step, and the active tab can change in between. Steps called
+    without a wizard (or before this was recorded) use the active molecule."""
+    mol = getattr(app, "_mpmc_state", {}).get("mol")
+    return app.molecule if mol is None else mol
+
+
 def _task_label(coro) -> str:
     """Human-readable name for a coroutine, e.g. '_do_wrap_async' -> 'wrap'."""
     name = getattr(coro, "__name__", None) or "task"
@@ -3370,7 +3422,7 @@ class MenuBar(Widget):
         for i, name in enumerate(self._tab_names):
             cls = "tab-label active" if i == self._active_tab else "tab-label"
             truncated = (name[:19] + "…") if len(name) > 20 else name
-            await self.mount(Label(f" {truncated} ", id=f"tab-{i}", classes=cls))
+            await self.mount(Label(f" {truncated} ", id=f"tab-{i}", classes=cls, markup=False))
         await self.mount(Label(" + ", id="tab-add", classes="tab-add"))
 
     def on_click(self, event) -> None:
@@ -3712,6 +3764,29 @@ class PdbWizardApp(App):
         # Per-session cache for downloaded structures. Created lazily on first
         # fetch; removed on app teardown.
         self._db_cache_dir_path: str | None = None
+        # The edit being applied in the background (worker thread plus refresh), if any.
+        self._edit_task: asyncio.Task | None = None
+
+    def _edit_running(self) -> bool:
+        """True, with a toast, while an earlier edit is still being applied. A second edit
+        or an undo started now would race it on the same molecule."""
+        task = self._edit_task
+        if task is None or task.done():
+            return False
+        self.notify("The previous edit is still running. Try again when it has finished.",
+                    timeout=4, severity="warning")
+        return True
+
+    def _start_edit(self, coro) -> asyncio.Task:
+        self._edit_task = self._track_task(coro)
+        return self._edit_task
+
+    @staticmethod
+    def _has_real_cell(mol) -> bool:
+        """A unit cell from the file or the user, not the huge stand-in box given to
+        trajectories that carry no cell."""
+        from pdb_wizard.io import is_fallback_cell
+        return mol.pbc is not None and not is_fallback_cell(mol.pbc)
 
     def notify_load_notes(self, mol) -> None:
         """Warn about anything the file reader could not honour (e.g. a CIF read as its
@@ -3876,6 +3951,19 @@ class PdbWizardApp(App):
                 view.set_molecule(self.molecule, keep_camera=False)
                 tab.camera_initialized = True
             self.query_one(GeometryPanel).set_molecule(self.molecule)
+        else:
+            # An empty tab (a trajectory still loading): do not leave the previous tab's
+            # structure on screen.
+            view.molecule = None
+            view.pbc = None
+            view.highlighted_atoms = set()
+            view._picked_atoms = []
+            view._atom_count = 0
+            panel = self.query_one(GeometryPanel)
+            panel._molecule = None
+            panel._populated_tabs = set()
+            for dt in panel.query(DataTable):
+                dt.clear()
         self._update_title()
         self._refresh_tab_bar()
         self._setup_traj_bar()
@@ -3971,7 +4059,7 @@ class PdbWizardApp(App):
                 self._tabs.append(new_tab)
                 self._refresh_tab_bar()
                 self.notify(f"Loading {new_tab.name}...", timeout=2)
-                self._track_task(self._load_traj_into_tab(filepath, len(self._tabs) - 1))
+                self._track_task(self._load_traj_into_tab(filepath, new_tab))
             else:
                 load_msgs: list[str] = []
                 mol = read_file(filepath, on_message=load_msgs.append)
@@ -3982,8 +4070,14 @@ class PdbWizardApp(App):
         except Exception as e:
             self.notify(f"Error: {e}", timeout=3)
 
-    async def _load_traj_into_tab(self, filepath: str, tab_idx: int) -> None:
-        """Load a trajectory file into a specific tab in the background."""
+    async def _load_traj_into_tab(self, filepath: str, tab) -> None:
+        """Load a trajectory file into a specific tab in the background.
+
+        ``tab`` is the TabState itself: tabs may be closed or opened while the file loads,
+        so a position in the tab bar would go stale. (An index is still accepted.)
+        """
+        if isinstance(tab, int):
+            tab = self._tabs[tab] if 0 <= tab < len(self._tabs) else None
         self._show_progress("Loading trajectory...", total=100)
         await asyncio.sleep(0)
 
@@ -4019,20 +4113,28 @@ class PdbWizardApp(App):
         if frames:
             await asyncio.to_thread(frames[0].detect_bonds)
 
-        # Update the tab state
-        if tab_idx < len(self._tabs):
-            tab = self._tabs[tab_idx]
-            tab.frames = frames
-            tab.molecule = frames[0] if frames else Molecule(atoms=[])
-
         self._hide_progress()
+
+        tab_idx = next((i for i, t in enumerate(self._tabs) if t is tab), None)
+        if tab_idx is None:
+            return  # the tab was closed while its file was loading
+
+        # Update the tab state
+        tab.frames = frames
+        tab.molecule = frames[0] if frames else Molecule(atoms=[])
 
         # Switch to the newly loaded tab. When loading into the already-active
         # (empty) tab, saving the current state first would clobber the frames
         # we just stored with the view's stale None.
-        if tab_idx < len(self._tabs):
-            if tab_idx != self._active_tab:
-                self._save_current_tab_state()
+        if tab_idx == self._active_tab:
+            self._restore_tab_state(tab_idx)
+        elif len(self.screen_stack) > 1:
+            # A dialog is open for the structure on screen: its answer must not land on
+            # another tab, so the new one waits for a click.
+            self.notify(f"Loaded {len(frames)} frames into the {tab.name} tab", timeout=4)
+            return
+        else:
+            self._save_current_tab_state()
             self._restore_tab_state(tab_idx)
         self.notify(f"Loaded {len(frames)} frames", timeout=2)
 
@@ -4118,6 +4220,7 @@ class PdbWizardApp(App):
         self.notify_load_notes(self.molecule)
 
     async def _load_trajectory_async(self) -> None:
+        tab = self._tabs[self._active_tab]  # the tab this file belongs to
         self._show_progress("Loading trajectory...", total=100)
         await asyncio.sleep(0)
 
@@ -4145,6 +4248,18 @@ class PdbWizardApp(App):
             await asyncio.to_thread(frames[0].detect_bonds)
 
         self._update_progress(80)
+
+        if tab is not self._tabs[self._active_tab]:
+            # Another file was opened in a new tab while this one loaded: the frames belong
+            # to the startup tab, not to whatever is on screen now.
+            self._hide_progress()
+            if any(t is tab for t in self._tabs):
+                tab.frames = frames
+                tab.frame_idx = 0
+                if frames:
+                    tab.molecule = frames[0]
+                self.notify(f"Loaded {len(frames)} frames into the {tab.name} tab", timeout=4)
+            return
 
         self._frames = frames
         self._frame_idx = 0
@@ -4766,7 +4881,7 @@ class PdbWizardApp(App):
             self.notify("Pillow required: pip install Pillow", timeout=3)
             return
 
-        stem = Path(self.filepath).stem
+        stem = Path(self.filepath).stem or "untitled"
         out_path = Path(self.filepath).parent / f"{stem}.png"
         img = Image.fromarray(pixels)
         await asyncio.to_thread(img.save, str(out_path))
@@ -4813,7 +4928,7 @@ class PdbWizardApp(App):
             self._update_progress(i + 1)
 
         self._hide_progress()
-        stem = Path(self.filepath).stem
+        stem = Path(self.filepath).stem or "untitled"
         out_path = Path(self.filepath).parent / (stem + ".gif")
         await asyncio.to_thread(
             frames_img[0].save,
@@ -5160,13 +5275,15 @@ class PdbWizardApp(App):
     def _do_edit_coord(self, idx: int, value: str) -> None:
         if not value.strip():
             return
+        if self._edit_running():
+            return
         try:
             import numpy as np
             parts = value.strip().split()
             x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
             self._save_undo()
             self.molecule.atoms[idx].x = np.array([x, y, z])
-            self._track_task(self._refresh_molecule(f"Updated atom {idx + 1} position"))
+            self._start_edit(self._refresh_molecule(f"Updated atom {idx + 1} position"))
         except (ValueError, IndexError):
             self.notify("Invalid input. Need: x y z", timeout=3)
 
@@ -5197,7 +5314,7 @@ class PdbWizardApp(App):
                 InputModal("Space group for the CRYSTAL23 input:", default="1",
                            hint="1 writes every atom in P1. A number from Find Symmetry "
                                 "writes only that group's asymmetric unit."),
-                callback=self._crystal_step_group,
+                callback=lambda v: self._crystal_step_group(v, mol),
             )
             return
 
@@ -5251,7 +5368,7 @@ class PdbWizardApp(App):
             return
 
         elif cmd == "pxrd":
-            if len(mol.atoms) == 0 or mol.pbc is None:
+            if len(mol.atoms) == 0 or not self._has_real_cell(mol):
                 self.notify("Need a crystal structure with PBC for PXRD", timeout=3)
                 return
             self.push_screen(PxrdScreen(mol))
@@ -5261,7 +5378,7 @@ class PdbWizardApp(App):
             if not self._frames or len(self._frames) < 2:
                 self.notify("Need a trajectory with PBC for 3D density", timeout=3)
                 return
-            if mol.pbc is None:
+            if not self._has_real_cell(mol):
                 self.notify("Need PBC for 3D density map", timeout=3)
                 return
             self._show_density3d()
@@ -5293,19 +5410,22 @@ class PdbWizardApp(App):
             return
 
         elif cmd == "void_vol":
+            if len(mol.atoms) == 0 or not self._has_real_cell(mol):
+                self.notify("Need PBC for void volume", timeout=3)
+                return
             self.notify("Calculating void volume (100k samples)...", timeout=2)
             self._track_task(self._calc_void_volume())
             return
 
         elif cmd == "surface_area":
-            if mol.pbc is None:
+            if not self._has_real_cell(mol):
                 self.notify("Need PBC for surface area", timeout=3)
                 return
             self._track_task(self._calc_surface_area())
             return
 
         elif cmd == "pore_size":
-            if mol.pbc is None:
+            if not self._has_real_cell(mol):
                 self.notify("Need PBC for pore size", timeout=3)
                 return
             self._track_task(self._calc_pore_size())
@@ -5325,7 +5445,7 @@ class PdbWizardApp(App):
             return
 
         elif cmd == "reduce_cell":
-            if mol.pbc is None:
+            if not self._has_real_cell(mol):
                 self.notify("Need PBC for supercell reduction", timeout=3)
                 return
             self.push_screen(ReduceCellScreen(mol), callback=self._apply_reduced_cell)
@@ -5385,7 +5505,7 @@ class PdbWizardApp(App):
                 ConfirmModal(
                     "Delete Lone Atoms",
                     "Remove all atoms that have no neighbors within\n"
-                    "VDW contact distance. This cannot be undone.\n\n"
+                    "VDW contact distance. Undo restores them.\n\n"
                     + (f"Would delete: {found}" if found else "No lone atoms found.")
                     + (f"\n\n⚠ {caution}" if caution else ""),
                 ),
@@ -5444,12 +5564,16 @@ class PdbWizardApp(App):
             )
             return
 
+        elif cmd in ("write_pdb", "write_lammps") and len(mol.atoms) == 0:
+            self.notify("Nothing to save: no atoms loaded", timeout=3, severity="warning")
+            return
+
         elif cmd == "write_xyz":
             stem = Path(self.filepath).stem
             default = str(Path(self.filepath).parent / f"{stem}_out.xyz")
             self.push_screen(
                 FileSaveModal("Save XYZ as:", default=default),
-                callback=self._do_write_xyz,
+                callback=lambda v: self._do_write_xyz(v, mol),
             )
             return
 
@@ -5458,7 +5582,7 @@ class PdbWizardApp(App):
             default = str(Path(self.filepath).parent / f"{stem}_out.pdb")
             self.push_screen(
                 FileSaveModal("Save standard PDB as:", default=default),
-                callback=self._do_write_pdb,
+                callback=lambda v: self._do_write_pdb(v, mol),
             )
             return
 
@@ -5467,7 +5591,8 @@ class PdbWizardApp(App):
                 return
             stem = Path(self.filepath).stem
             default = str(Path(self.filepath).parent / f"{stem}_out.cif")
-            self.push_screen(FileSaveModal("Save CIF as:", default=default), callback=self._do_write_cif)
+            self.push_screen(FileSaveModal("Save CIF as:", default=default),
+                             callback=lambda v: self._do_write_cif(v, mol))
             return
 
         elif cmd == "write_poscar":
@@ -5475,13 +5600,15 @@ class PdbWizardApp(App):
                 return
             stem = Path(self.filepath).stem
             default = str(Path(self.filepath).parent / "POSCAR")
-            self.push_screen(FileSaveModal("Save POSCAR as:", default=default), callback=self._do_write_poscar)
+            self.push_screen(FileSaveModal("Save POSCAR as:", default=default),
+                             callback=lambda v: self._do_write_poscar(v, mol))
             return
 
         elif cmd == "write_lammps":
             stem = Path(self.filepath).stem
             default = str(Path(self.filepath).parent / (stem + ".data"))
-            self.push_screen(FileSaveModal("Save LAMMPS data as:", default=default), callback=self._do_write_lammps)
+            self.push_screen(FileSaveModal("Save LAMMPS data as:", default=default),
+                             callback=lambda v: self._do_write_lammps(v, mol))
             return
 
         elif cmd == "open_file":
@@ -5513,7 +5640,8 @@ class PdbWizardApp(App):
             # The wizard mutates charges and force-field parameters on the
             # live molecule, so make the whole export undoable in one step.
             self._save_undo()
-            self._mpmc_state = {"write_charges": False, "write_ff": False}
+            self._mpmc_state = {"write_charges": False, "write_ff": False,
+                                "mol": mol, "filepath": self.filepath}
             # Check if atoms already have charges
             has_charges = any(abs(a.charge) > 1e-10 for a in mol.atoms)
             if has_charges:
@@ -5547,7 +5675,7 @@ class PdbWizardApp(App):
         writers are no-ops without a cell; guarding here keeps the TUI from
         reporting success for something that did nothing.
         """
-        if self.molecule.pbc is not None:
+        if self._has_real_cell(self.molecule):
             return True
         self.notify(
             f"{what} needs a unit cell (PBC). This structure has none — "
@@ -5556,10 +5684,12 @@ class PdbWizardApp(App):
         )
         return False
 
-    def _discard_last_undo(self) -> None:
-        """Drop the most recent undo entry (an operation turned out to be a no-op)."""
-        if self._undo_stack:
-            self._undo_stack.pop()
+    def _discard_last_undo(self, stack=None) -> None:
+        """Drop the most recent undo entry (an operation turned out to be a no-op).
+        ``stack`` is the undo stack the entry was pushed on (default: the active tab's)."""
+        stack = self._undo_stack if stack is None else stack
+        if stack:
+            stack.pop()
 
     def _write_text_file(self, filepath: str, writer, what: str) -> bool:
         """Render with ``writer(handle)`` into memory, then write the file.
@@ -5583,9 +5713,13 @@ class PdbWizardApp(App):
         self.notify(f"Wrote {filepath}", timeout=3)
         return True
 
-    async def _refresh_molecule(self, msg: str = "") -> None:
-        """Redetect bonds and refresh the view and geometry panel."""
-        mol = self.molecule
+    async def _refresh_molecule(self, msg: str = "", mol=None) -> None:
+        """Redetect bonds and refresh the view and geometry panel.
+
+        ``mol`` is the molecule that was edited (default: the active one). If another tab
+        is on screen by the time a step finishes, the view and panel are left alone.
+        """
+        mol = self.molecule if mol is None else mol
         self._show_progress("Detecting bonds...", total=100)
         await asyncio.sleep(0)
 
@@ -5595,7 +5729,8 @@ class PdbWizardApp(App):
         await asyncio.to_thread(mol.detect_bonds, progress_callback=_bond_progress)
         self._update_progress(80)
         view = self.query_one(MoleculeView)
-        view.set_molecule(mol)
+        if mol is self.molecule:
+            view.set_molecule(mol)
         self.query_one("#status-label", Label).update("Computing geometry tables...")
         await asyncio.sleep(0)
         # Pre-compute the heavy geometry data in a thread
@@ -5610,9 +5745,15 @@ class PdbWizardApp(App):
         self.query_one("#status-label", Label).update("Populating tables...")
         await asyncio.sleep(0)
         panel = self.query_one(GeometryPanel)
-        panel._molecule = mol
-        if panel.is_mounted:
-            await self._populate_tables_async(panel, mol)
+        if mol is self.molecule:
+            panel._molecule = mol
+            if panel.is_mounted:
+                await self._populate_tables_async(panel, mol)
+        else:
+            for attr in ('_cached_bond_lengths', '_cached_angles', '_cached_dihedrals',
+                         '_cached_contacts', '_cached_molecules', '_cached_lone_atoms'):
+                if hasattr(mol, attr):
+                    delattr(mol, attr)
         self._update_progress(100)
         self._hide_progress()
         if msg:
@@ -5620,50 +5761,54 @@ class PdbWizardApp(App):
         view._invalidate_cache()
 
     def _do_wrap(self, confirmed: bool, forward: bool) -> None:
-        if not confirmed:
+        if not confirmed or self._edit_running():
             return
-        self._track_task(self._do_wrap_async(forward))
+        self._start_edit(self._do_wrap_async(forward))
 
     async def _do_wrap_async(self, forward: bool) -> None:
         from pdb_wizard.operations import wrap_atoms
+        mol = self.molecule
         self._save_undo()
         self._show_progress("Wrapping atoms...")
         await asyncio.sleep(0)
-        await asyncio.to_thread(wrap_atoms, self.molecule, forward)
+        await asyncio.to_thread(wrap_atoms, mol, forward)
         label = "forward" if forward else "centered"
-        await self._refresh_molecule(f"Wrapped atoms ({label})")
+        await self._refresh_molecule(f"Wrapped atoms ({label})", mol)
 
     def _do_sort(self, confirmed: bool) -> None:
-        if not confirmed:
+        if not confirmed or self._edit_running():
             return
-        self._track_task(self._do_sort_async())
+        self._start_edit(self._do_sort_async())
 
     async def _do_sort_async(self) -> None:
+        mol = self.molecule
         self._save_undo()
         from pdb_wizard.operations import sort_system
         self._show_progress("Sorting atoms...")
         await asyncio.sleep(0)
-        await asyncio.to_thread(sort_system, self.molecule, False)
-        await self._refresh_molecule("Sorted atoms")
+        await asyncio.to_thread(sort_system, mol, False)
+        await self._refresh_molecule("Sorted atoms", mol)
 
     def _do_del_lone(self, confirmed: bool) -> None:
-        if not confirmed:
+        if not confirmed or self._edit_running():
             return
-        self._track_task(self._do_del_lone_async())
+        self._start_edit(self._do_del_lone_async())
 
     async def _do_del_lone_async(self) -> None:
+        mol = self.molecule
         self._save_undo()
+        undo = self._undo_stack
         from pdb_wizard.geometry import remove_lone_atoms
         self._show_progress("Finding lone atoms...")
         await asyncio.sleep(0)
-        _, deleted = await asyncio.to_thread(remove_lone_atoms, self.molecule)
+        _, deleted = await asyncio.to_thread(remove_lone_atoms, mol)
         if not deleted:
-            self._discard_last_undo()
+            self._discard_last_undo(undo)
             self._hide_progress()
             self.notify("No lone atoms found", timeout=3)
             return
         n = len(deleted)
-        await self._refresh_molecule(f"Deleted {n} lone atom{'s' if n != 1 else ''}")
+        await self._refresh_molecule(f"Deleted {n} lone atom{'s' if n != 1 else ''}", mol)
 
     def _do_open_file(self, value: str | None) -> None:
         """Callback for the File > Open... picker."""
@@ -5683,7 +5828,7 @@ class PdbWizardApp(App):
                     self.filepath = filepath
                     self._refresh_tab_bar()
                     self.notify(f"Loading {Path(filepath).name}...", timeout=2)
-                    self._track_task(self._load_traj_into_tab(filepath, self._active_tab))
+                    self._track_task(self._load_traj_into_tab(filepath, tab))
                     return
                 load_msgs: list[str] = []
                 mol = read_file(filepath, on_message=load_msgs.append)
@@ -5713,11 +5858,14 @@ class PdbWizardApp(App):
         na, nb, nc = value
         if na == 0 and nb == 0 and nc == 0:
             return  # no-op
-        self._track_task(self._do_extend_async(na, nb, nc))
+        if self._edit_running():
+            return
+        self._start_edit(self._do_extend_async(na, nb, nc))
 
     async def _do_extend_async(self, na: int, nb: int, nc: int) -> None:
         """Add na, nb, nc extra copies along a, b, c (classic-menu counting)."""
         size = f"{na + 1}x{nb + 1}x{nc + 1}"
+        target = self.molecule
         self._save_undo()
         from pdb_wizard.operations import extend_axis
         self._show_progress(f"Extending to {size}...")
@@ -5735,8 +5883,8 @@ class PdbWizardApp(App):
                 extend_axis(mol, 2, nc)
             return mol
 
-        await asyncio.to_thread(_extend_all, self.molecule)
-        await self._refresh_molecule(f"Extended to {size}")
+        await asyncio.to_thread(_extend_all, target)
+        await self._refresh_molecule(f"Extended to {size}", target)
 
     def _confirm_overwrite(self, filepath: str, callback) -> None:
         """If filepath exists, prompt to overwrite. Otherwise call callback directly."""
@@ -5752,57 +5900,65 @@ class PdbWizardApp(App):
         else:
             callback(filepath)
 
-    def _do_write_xyz(self, value: str) -> None:
+    # The writers take the molecule the Save dialog was opened for (``mol``); the active
+    # tab can change while the dialog is up. Without it they write the active molecule.
+
+    def _do_write_xyz(self, value: str, mol=None) -> None:
         if not value.strip():
             return
-        self._confirm_overwrite(value.strip(), self._write_xyz_file)
+        self._confirm_overwrite(value.strip(), lambda p: self._write_xyz_file(p, mol))
 
-    def _write_xyz_file(self, filepath: str) -> None:
+    def _write_xyz_file(self, filepath: str, mol=None) -> None:
         from pdb_wizard.io import write_xyz
+        mol = self.molecule if mol is None else mol
         try:
             with open(filepath, "w") as f:
-                write_xyz(self.molecule, f)
+                write_xyz(mol, f)
             self.notify(f"Wrote {filepath}", timeout=3)
         except OSError as e:
             self.notify(f"Error: {e}", timeout=3)
 
-    def _do_write_pdb(self, value: str) -> None:
+    def _do_write_pdb(self, value: str, mol=None) -> None:
         if not value.strip():
             return
-        self._confirm_overwrite(value.strip(), self._write_pdb_file)
+        self._confirm_overwrite(value.strip(), lambda p: self._write_pdb_file(p, mol))
 
-    def _write_pdb_file(self, filepath: str) -> None:
+    def _write_pdb_file(self, filepath: str, mol=None) -> None:
         from pdb_wizard.io import write_standard_pdb
+        mol = self.molecule if mol is None else mol
         self._write_text_file(
-            filepath, lambda f: write_standard_pdb(self.molecule, f), "Writing PDB",
+            filepath, lambda f: write_standard_pdb(mol, f), "Writing PDB",
         )
 
-    def _do_write_cif(self, value: str) -> None:
+    def _do_write_cif(self, value: str, mol=None) -> None:
         if not value.strip():
             return
-        self._confirm_overwrite(value.strip(), self._write_cif_file)
+        self._confirm_overwrite(value.strip(), lambda p: self._write_cif_file(p, mol))
 
-    def _write_cif_file(self, filepath: str) -> None:
+    def _write_cif_file(self, filepath: str, mol=None) -> None:
         from pdb_wizard.formats import write_cif
-        self._write_text_file(filepath, lambda f: write_cif(self.molecule, f), "Writing CIF")
+        mol = self.molecule if mol is None else mol
+        self._write_text_file(filepath, lambda f: write_cif(mol, f), "Writing CIF")
 
-    def _do_write_poscar(self, value: str) -> None:
+    def _do_write_poscar(self, value: str, mol=None) -> None:
         if not value.strip():
             return
-        self._confirm_overwrite(value.strip(), self._write_poscar_file)
+        self._confirm_overwrite(value.strip(), lambda p: self._write_poscar_file(p, mol))
 
-    def _write_poscar_file(self, filepath: str) -> None:
+    def _write_poscar_file(self, filepath: str, mol=None) -> None:
         from pdb_wizard.formats import write_poscar
+        mol = self.molecule if mol is None else mol
         self._write_text_file(
-            filepath, lambda f: write_poscar(self.molecule, f), "Writing POSCAR",
+            filepath, lambda f: write_poscar(mol, f), "Writing POSCAR",
         )
 
-    def _crystal_step_group(self, value: str | None) -> None:
+    def _crystal_step_group(self, value: str | None, mol=None) -> None:
         if value is None:
             return
         from pdb_wizard.crystal import crystal_reduction_choice
+        mol = self.molecule if mol is None else mol
         try:
-            reduction = crystal_reduction_choice(self.molecule, value)
+            reduction = crystal_reduction_choice(mol, value)
         except ValueError as e:
             self.notify(str(e), timeout=12, severity="warning")
             return
@@ -5810,33 +5966,35 @@ class PdbWizardApp(App):
         default = str(Path(self.filepath).parent / f"{stem}.d12")
         self.push_screen(
             FileSaveModal("Save CRYSTAL23 input as:", default=default),
-            callback=lambda path: self._do_write_crystal(path, reduction),
+            callback=lambda path: self._do_write_crystal(path, reduction, mol),
         )
 
-    def _do_write_crystal(self, value: str, reduction) -> None:
+    def _do_write_crystal(self, value: str, reduction, mol=None) -> None:
         if not value or not value.strip():
             return
         from pdb_wizard.crystal import write_crystal_d12
+        mol = self.molecule if mol is None else mol
         self._confirm_overwrite(
             value.strip(),
             lambda path: self._write_text_file(
-                path, lambda f: write_crystal_d12(self.molecule, f, reduction),
+                path, lambda f: write_crystal_d12(mol, f, reduction),
                 "Writing CRYSTAL23 input"),
         )
 
-    def _do_write_lammps(self, value: str) -> None:
+    def _do_write_lammps(self, value: str, mol=None) -> None:
         if not value.strip():
             return
-        self._confirm_overwrite(value.strip(), self._write_lammps_file)
+        self._confirm_overwrite(value.strip(), lambda p: self._write_lammps_file(p, mol))
 
-    def _write_lammps_file(self, filepath: str) -> None:
+    def _write_lammps_file(self, filepath: str, mol=None) -> None:
         from pdb_wizard.formats import write_lammps_data
+        mol = self.molecule if mol is None else mol
         self._write_text_file(
-            filepath, lambda f: write_lammps_data(self.molecule, f), "Writing LAMMPS data",
+            filepath, lambda f: write_lammps_data(mol, f), "Writing LAMMPS data",
         )
 
     def _apply_reduced_cell(self, result: Molecule | None) -> None:
-        if result is None:
+        if result is None or self._edit_running():
             return
         self._save_undo()
         self.molecule = result
@@ -5854,6 +6012,8 @@ class PdbWizardApp(App):
         parts = value.strip().split()
         if len(parts) != 2:
             self.notify("Enter: old_element new_element (e.g. Cu Zn)", timeout=3)
+            return
+        if self._edit_running():
             return
         old_el, new_el = parts[0], parts[1]
         from pdb_wizard.constants import get_element
@@ -5874,7 +6034,7 @@ class PdbWizardApp(App):
             return
         # Bond radii changed with the element: re-detect bonds and rebuild
         # the geometry tables like every other mutating operation does.
-        self._track_task(
+        self._start_edit(
             self._refresh_molecule(f"Substituted {count} {old_el} -> {new_el}")
         )
 
@@ -5885,32 +6045,39 @@ class PdbWizardApp(App):
             parts = value.strip().split()
             element = parts[0].strip().capitalize()
             distance = float(parts[1])
-            self._track_task(self._do_edit_h_async(element, distance))
+            if not np.isfinite(distance) or distance <= 0:
+                self.notify("The distance must be a positive number, e.g. O 1.0", timeout=3)
+                return
+            if self._edit_running():
+                return
+            self._start_edit(self._do_edit_h_async(element, distance))
         except (ValueError, IndexError):
             self.notify("Invalid input. Use: O 1.0, C 1.09, etc.", timeout=3)
 
     async def _do_edit_h_async(self, element: str, distance: float) -> None:
+        mol = self.molecule
         self._save_undo()
+        undo = self._undo_stack
         from pdb_wizard.geometry import adjust_h_distances
         self._show_progress(f"Editing {element}-H distances...")
         await asyncio.sleep(0)
         _, messages = await asyncio.to_thread(
-            adjust_h_distances, self.molecule, element, distance,
+            adjust_h_distances, mol, element, distance,
         )
         if not messages:
-            self._discard_last_undo()
+            self._discard_last_undo(undo)
             self._hide_progress()
             self.notify(f"No bonded {element}-H pairs found; nothing changed", timeout=4)
             return
         n = len(messages)
         await self._refresh_molecule(
-            f"Set {n} {element}-H distance{'s' if n != 1 else ''} to {distance} A"
+            f"Set {n} {element}-H distance{'s' if n != 1 else ''} to {distance} A", mol
         )
 
     def _do_qeq_charges(self, confirmed: bool) -> None:
-        if not confirmed:
+        if not confirmed or self._edit_running():
             return
-        self._track_task(self._do_qeq_async())
+        self._start_edit(self._do_qeq_async())
 
     async def _do_qeq_async(self) -> None:
         from pdb_wizard.charges import apply_qeq_charges
@@ -6066,29 +6233,75 @@ class PdbWizardApp(App):
         if not filepath.strip():
             return
         from pdb_wizard.energy import read_energy_dat
-        data = read_energy_dat(filepath.strip())
+        try:
+            data = read_energy_dat(filepath.strip())
+        except (OSError, ValueError, IndexError) as e:  # a folder, not text, ragged rows
+            self.notify(f"Could not read {filepath}: {e}", timeout=5, severity="error")
+            return
         if not data:
             self.notify(f"Could not read {filepath}", timeout=3)
             return
+        if not [k for k in data if k != "step"]:
+            self.notify(f"Nothing to plot in {filepath}: it has only a step column",
+                        timeout=5, severity="warning")
+            return
         self.push_screen(EnergyPlotScreen(data, filepath.strip()))
 
-    def _save_undo(self) -> None:
+    def _save_undo(self, frame_cells: bool = False, mol=None, undo=None, redo=None) -> None:
+        """Snapshot the molecule for Undo. ``frame_cells`` also keeps every trajectory
+        frame's cell (for an edit that changes them all). ``mol``, ``undo`` and ``redo``
+        name another tab's molecule and stacks (default: the active tab's)."""
         import copy
-        self._undo_stack.append(copy.deepcopy(self.molecule))
-        if len(self._undo_stack) > 10:
-            self._undo_stack.pop(0)
-        self._redo_stack.clear()
+        snap = copy.deepcopy(self.molecule if mol is None else mol)
+        if self._frames and (mol is None or mol is self.molecule):
+            snap._undo_frame_idx = self._frame_idx
+        if frame_cells and self._frames:
+            snap._undo_frame_cells = [copy.deepcopy(f.pbc) for f in self._frames]
+        undo = self._undo_stack if undo is None else undo
+        undo.append(snap)
+        if len(undo) > 10:
+            undo.pop(0)
+        (self._redo_stack if redo is None else redo).clear()
+
+    def _swap_in_snapshot(self, source: list, target: list) -> None:
+        """Make the top of ``source`` the molecule; push the current one on ``target``."""
+        import copy
+        snap = source.pop()
+        idx = snap.__dict__.pop("_undo_frame_idx", None)
+        if (idx is not None and self._frames and idx != self._frame_idx
+                and 0 <= idx < len(self._frames)):
+            # The snapshot is of another frame than the one on screen: go back to it, or
+            # the frame on screen would be overwritten with that frame's atoms.
+            self._frame_idx = idx
+            self.molecule = self._frames[idx]
+        current = copy.deepcopy(self.molecule)
+        if self._frames:
+            current._undo_frame_idx = self._frame_idx
+        cells = snap.__dict__.pop("_undo_frame_cells", None)
+        if cells is not None and self._frames and len(cells) == len(self._frames):
+            current._undo_frame_cells = [copy.deepcopy(f.pbc) for f in self._frames]
+            for frame, cell in zip(self._frames, cells):
+                frame.pbc = cell
+        target.append(current)
+        self.molecule = snap
+        if self._frames and 0 <= self._frame_idx < len(self._frames):
+            # The shown frame is this molecule: without this the edit comes back as soon
+            # as the user steps to another frame and returns.
+            self._frames[self._frame_idx] = snap
 
     def _do_undo(self) -> None:
         if not self._undo_stack:
             self.notify("Nothing to undo", timeout=2)
             return
-        import copy
-        self._redo_stack.append(copy.deepcopy(self.molecule))
-        self.molecule = self._undo_stack.pop()
+        if self._edit_running():
+            return
+        self._swap_in_snapshot(self._undo_stack, self._redo_stack)
         view = self.query_one(MoleculeView)
         view.set_molecule(self.molecule)
         self.query_one(GeometryPanel).set_molecule(self.molecule)
+        if self._frames:
+            self._update_title()
+            self._setup_traj_bar()
         view._invalidate_cache()
         self.notify("Undone", timeout=1)
 
@@ -6096,12 +6309,15 @@ class PdbWizardApp(App):
         if not self._redo_stack:
             self.notify("Nothing to redo", timeout=2)
             return
-        import copy
-        self._undo_stack.append(copy.deepcopy(self.molecule))
-        self.molecule = self._redo_stack.pop()
+        if self._edit_running():
+            return
+        self._swap_in_snapshot(self._redo_stack, self._undo_stack)
         view = self.query_one(MoleculeView)
         view.set_molecule(self.molecule)
         self.query_one(GeometryPanel).set_molecule(self.molecule)
+        if self._frames:
+            self._update_title()
+            self._setup_traj_bar()
         view._invalidate_cache()
         self.notify("Redone", timeout=1)
 
@@ -6111,26 +6327,40 @@ class PdbWizardApp(App):
         if value is None or not value.strip():
             return
         text = value.strip().lower()
+        if self._edit_running():
+            return
+        # A trajectory has one cell per frame; the new cell applies to all of them (as in
+        # the classic menu), or the analyses over frames would use the old ones.
+        others = [f for f in (self._frames or []) if f is not self.molecule]
         # Sentinel words to remove the box entirely (turn off PBC)
         if text in ("none", "off", "remove", "delete", "no", "0"):
             if self.molecule.pbc is None:
                 self.notify("This system already has no PBC", timeout=2)
                 return
-            self._save_undo()
+            self._save_undo(frame_cells=True)
             self.molecule.pbc = None
-            self._track_task(self._refresh_molecule("PBC removed"))
+            for frame in others:
+                frame.pbc = None
+            self._start_edit(self._refresh_molecule("PBC removed"))
             return
         try:
             parts = value.strip().split()
             a, b, c = float(parts[0]), float(parts[1]), float(parts[2])
             alpha, beta, gamma = float(parts[3]), float(parts[4]), float(parts[5])
-            self._save_undo()
+            from pdb_wizard.pbc import PBC, cell_problem
+            problem = cell_problem(a, b, c, alpha, beta, gamma)
+            if problem:
+                self.notify(f"{problem}. The cell was not changed.", timeout=5,
+                            severity="warning")
+                return
+            self._save_undo(frame_cells=True)
             if self.molecule.pbc is not None:
                 self.molecule.pbc.update(a, b, c, alpha, beta, gamma)
             else:
-                from pdb_wizard.pbc import PBC
                 self.molecule.pbc = PBC(a, b, c, alpha, beta, gamma)
-            self._track_task(
+            for frame in others:
+                frame.pbc = PBC(a, b, c, alpha, beta, gamma)
+            self._start_edit(
                 self._refresh_molecule(f"Cell: {a:.3f} {b:.3f} {c:.3f} {alpha:.1f} {beta:.1f} {gamma:.1f}")
             )
         except (ValueError, IndexError):
@@ -6166,11 +6396,14 @@ class PdbWizardApp(App):
             self._mpmc_step_charges_file_prompt()
         else:
             # Run QEq
+            if self._edit_running():
+                return
             self._mpmc_state["write_charges"] = True
-            self._track_task(self._mpmc_run_qeq())
+            self._start_edit(self._mpmc_run_qeq())
 
     async def _mpmc_run_qeq(self) -> None:
         from pdb_wizard.charges import apply_qeq_charges
+        mol = _mpmc_wizard_molecule(self)
         self._show_progress("Computing QEq charges...", total=100)
         await asyncio.sleep(0)
 
@@ -6178,13 +6411,16 @@ class PdbWizardApp(App):
             self.call_from_thread(self._update_progress, int(frac * 100))
 
         try:
-            await asyncio.to_thread(apply_qeq_charges, self.molecule, progress_callback=_progress)
+            await asyncio.to_thread(apply_qeq_charges, mol, progress_callback=_progress)
             self._hide_progress()
-            total_q = sum(a.charge for a in self.molecule.atoms)
+            total_q = sum(a.charge for a in mol.atoms)
             self.notify(f"QEq charges applied (total: {total_q:.4f} e)", timeout=2)
         except Exception as e:
+            # No charges were made, so the export stops here rather than writing a file
+            # whose charge column was never filled.
             self._hide_progress()
-            self.notify(f"QEq failed: {e}", timeout=5)
+            self.notify(f"QEq failed: {e}. Nothing was written.", timeout=8, severity="error")
+            return
         self._mpmc_step_ask_ff()
 
     def _mpmc_step_charges_file_prompt(self) -> None:
@@ -6197,7 +6433,7 @@ class PdbWizardApp(App):
     def _mpmc_step_charges_file(self, result: dict) -> None:
         if not result:
             return  # cancelled
-        mol = self.molecule
+        mol = _mpmc_wizard_molecule(self)
         try:
             from pdb_wizard.io import assign_framework_charges, read_charges_file
             charges = read_charges_file(
@@ -6224,7 +6460,7 @@ class PdbWizardApp(App):
 
     def _mpmc_step_ask_ff(self) -> None:
         self.push_screen(
-            ForceFieldModal(self.molecule),
+            ForceFieldModal(_mpmc_wizard_molecule(self)),
             callback=self._mpmc_step_ff_apply,
         )
 
@@ -6241,7 +6477,8 @@ class PdbWizardApp(App):
             )
             ff_map = {"OPLSAA": 0, "PHAHST": 1}
             ff_idx = ff_map.get(ff_name, 0)
-            _, missing = apply_ff_to_system_report(self.molecule.atoms, get_forcefield(ff_idx))
+            mol = _mpmc_wizard_molecule(self)
+            _, missing = apply_ff_to_system_report(mol.atoms, get_forcefield(ff_idx))
             label = ["OPLS-AA/UFF", "PHAHST"][ff_idx]
             self.notify(f"Applied {label} force field", timeout=2)
             for msg in missing_ff_messages(missing):
@@ -6292,12 +6529,15 @@ class PdbWizardApp(App):
             self.notify(str(e), severity="warning")
             self._pack_ask_count(model)
             return
-        self._track_task(self._pack_sorbates_async(model, n))
+        if self._edit_running():
+            return
+        self._start_edit(self._pack_sorbates_async(model, n))
 
     async def _pack_sorbates_async(self, model, n: int | None) -> None:
         from pdb_wizard.io import next_mpmc_mol_id
         from pdb_wizard.sorbates import insert_sorbates, sorbate_atoms
         mol = self.molecule
+        undo, redo = self._undo_stack, self._redo_stack
         self._show_progress(f"Packing {model.label}...")
         await asyncio.sleep(0)
         placed = await asyncio.to_thread(insert_sorbates, mol, model, n)
@@ -6306,11 +6546,11 @@ class PdbWizardApp(App):
             self.notify("No room for even one molecule with these settings.",
                         severity="error", timeout=5)
             return
-        self._save_undo()
+        self._save_undo(mol=mol, undo=undo, redo=redo)
         mol.atoms.extend(sorbate_atoms(model, placed, next_mpmc_mol_id(mol)))
         full = "" if n is None or len(placed) == n else f" (asked for {n}; the cell is full)"
         await self._refresh_molecule(
-            f"Packed {len(placed)} {model.label}{full}. Save as MPMC PDB for MPMC.")
+            f"Packed {len(placed)} {model.label}{full}. Save as MPMC PDB for MPMC.", mol)
 
     def _mpmc_step_sorbate(self) -> None:
         self.push_screen(
@@ -6347,8 +6587,9 @@ class PdbWizardApp(App):
         self._mpmc_step_filename()
 
     def _mpmc_step_filename(self) -> None:
-        stem = Path(self.filepath).stem
-        default = str(Path(self.filepath).parent / f"{stem}_out_mpmc.pqr")
+        filepath = getattr(self, "_mpmc_state", {}).get("filepath", self.filepath)
+        stem = Path(filepath).stem
+        default = str(Path(filepath).parent / f"{stem}_out_mpmc.pqr")
         self.push_screen(
             FileSaveModal("Save MPMC PDB as:", default=default),
             callback=self._mpmc_step_write,
@@ -6365,10 +6606,10 @@ class PdbWizardApp(App):
 
         sorbate_lines = None
         sorbate_name = self._mpmc_state.get("sorbate")
+        mol = _mpmc_wizard_molecule(self)
         if sorbate_name:
             from pdb_wizard.io import next_mpmc_mol_id
             from pdb_wizard.sorbates import format_inserted_sorbates, insert_sorbates
-            mol = self.molecule
             n_want = self._mpmc_state.get("sorbate_n", 1)
             placed = insert_sorbates(mol, sorbate_name, n_want)
             if not placed:
@@ -6385,7 +6626,7 @@ class PdbWizardApp(App):
         self._write_text_file(
             filepath,
             lambda f: write_mpmc_pdb(
-                self.molecule, f,
+                mol, f,
                 write_charges=self._mpmc_state["write_charges"],
                 write_params=self._mpmc_state["write_ff"],
                 sorbate_lines=sorbate_lines,

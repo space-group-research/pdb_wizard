@@ -84,6 +84,11 @@ def _ensure_installed(package, import_name=None):
         return True
     except ImportError:
         pass
+    try:
+        if not _sys.stdin.isatty():
+            return False  # never ask a script: the question would swallow its input
+    except (AttributeError, ValueError):
+        return False
     print(f"\\'{package}\\' is not installed.")
     try:
         answer = input(f"Install it now with pip? [Y/n] ").strip().lower()
@@ -257,6 +262,49 @@ def deduplicate_imports(imports: list[str]) -> tuple[list[str], list[str]]:
     return standard, textual
 
 
+OLDEST_PYTHON = (3, 7)  # the single file must run there
+
+
+def minified_problem_for_old_python(source: str) -> str:
+    """Why ``source`` would not parse on OLDEST_PYTHON ('' if it would).
+
+    ``ast.parse(feature_version=...)`` catches most newer syntax. From Python 3.12 the parser
+    also accepts an f-string that reuses its own quote character inside a replacement field
+    (PEP 701) whatever feature_version says, so that is looked for in the token stream.
+    """
+    import ast
+    import io
+    import tokenize
+    try:
+        ast.parse(source, feature_version=OLDEST_PYTHON)
+    except SyntaxError as e:
+        return f"line {e.lineno}: {e.msg}"
+    fstring_start = getattr(tokenize, "FSTRING_START", None)
+    if fstring_start is None:  # before 3.12 the parser itself rejects it (above)
+        return ""
+    def clashes(inner: str, outer: str) -> bool:
+        # inside f"..." no '"' at all; inside f"""...""" only another '"""'
+        return inner[0] == outer[0] and (len(outer) == 1 or len(inner) == 3)
+
+    def quote_of(text: str) -> str:
+        body = text.lstrip("rRbBfFuU")
+        return body[:3] if body[:3] in ('"""', "'''") else body[:1]
+
+    open_quotes: list = []
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type == fstring_start or (tok.type == tokenize.STRING and open_quotes):
+            quote = quote_of(tok.string)
+            if any(clashes(quote, outer) for outer in open_quotes):
+                return f"line {tok.start[0]}: an f-string reuses its quote character"
+            if tok.type == fstring_start:
+                open_quotes.append(quote)
+            elif "\n" in tok.string or "\\" in tok.string:
+                return f"line {tok.start[0]}: a backslash or newline inside an f-string field"
+        elif tok.type == tokenize.FSTRING_END:
+            open_quotes.pop()
+    return ""
+
+
 def build() -> None:
     DIST_DIR.mkdir(exist_ok=True)
 
@@ -357,6 +405,16 @@ def build() -> None:
         # f-strings with unicode onto one line — verify it compiles
         compile(minified, "<minified>", "exec")
         min_path = DIST_DIR / "pdb_wizard.min.py"
+        # ... and it writes for the Python it runs on: built on 3.12 it reuses quotes inside
+        # f-strings, which no older Python can read. Such a file is not written.
+        problem = minified_problem_for_old_python(minified)
+        if problem:
+            if min_path.exists():
+                min_path.unlink()  # do not leave an older build's file looking current
+            print(f"Minified build skipped: it would not run on Python "
+                  f"{OLDEST_PYTHON[0]}.{OLDEST_PYTHON[1]} ({problem}). "
+                  f"Build with an older Python to get {min_path.name}.")
+            return
         min_path.write_text(minified)
         min_path.chmod(0o755)
         ratio = len(minified) / len(full_source) * 100
