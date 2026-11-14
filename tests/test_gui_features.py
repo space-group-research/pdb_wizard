@@ -333,7 +333,8 @@ def zinc(w):
 
 def test_redo_sits_under_undo_with_its_shortcuts(window):
     w = window
-    edit = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Edit")
+    top = w.menuBar().actions()  # held: older PySide6 drops a menu whose action wrapper dies
+    edit = next(a for a in top if a.text() == "&Edit").menu()
     first, second = edit.actions()[:2]
     assert first is w.undo_action and second is w.redo_action
     assert w.actions_by_name["Redo"] is w.redo_action and w.redo_action.text() == "Re&do"

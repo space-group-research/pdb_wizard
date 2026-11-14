@@ -92,11 +92,12 @@ def water_trajectory(n_frames: int = 12) -> list:
 # ---- drivers ----------------------------------------------------------------------------
 
 
-async def _tui(mol, screen, prefix: str, compute: bool = True):
+async def _tui(mol, make_screen, prefix: str, compute: bool = True):
     mol = mol if mol is not None else Molecule(atoms=[])
     app = PdbWizardApp(molecule=mol, filepath="t.pdb")
     async with app.run_test(size=(220, 60)) as pilot:
         await pilot.pause()
+        screen = make_screen()  # built here: Python 3.9 needs a running event loop for it
         app.push_screen(screen)
         await pilot.pause()
         if compute:
@@ -113,8 +114,9 @@ async def _tui(mol, screen, prefix: str, compute: bool = True):
         return plot._x.copy(), plot._y.copy(), plot._title, status
 
 
-def tui_run(mol, screen, prefix: str, compute: bool = True):
-    return asyncio.run(_tui(mol, screen, prefix, compute))
+def tui_run(mol, make_screen, prefix: str, compute: bool = True):
+    """``make_screen`` is a zero-argument callable returning the screen to test."""
+    return asyncio.run(_tui(mol, make_screen, prefix, compute))
 
 
 def gui_run(qtbot, key, mol, frames=None):
@@ -139,19 +141,19 @@ def assert_same(tui, gui_out):
 
 def test_rdf_single_structure(qtbot):
     mol = mixed_mol()
-    assert_same(tui_run(mol, RdfScreen(mol), "rdf"), gui_run(qtbot, "rdf", mol))
+    assert_same(tui_run(mol, lambda: RdfScreen(mol), "rdf"), gui_run(qtbot, "rdf", mol))
 
 
 def test_rdf_trajectory(qtbot):
     frames = water_trajectory()
-    t = tui_run(frames[0], RdfScreen(frames[0], frames), "rdf")
+    t = tui_run(frames[0], lambda: RdfScreen(frames[0], frames), "rdf")
     assert "frames 1-12" in t[2]
     assert_same(t, gui_run(qtbot, "rdf", frames[0], frames))
 
 
 def test_coordination(qtbot):
     mol = mixed_mol()
-    assert_same(tui_run(mol, CoordinationScreen(mol), "coord"),
+    assert_same(tui_run(mol, lambda: CoordinationScreen(mol), "coord"),
                 gui_run(qtbot, "coordination", mol))
 
 
@@ -159,7 +161,7 @@ def test_coordination(qtbot):
 def test_hbonds(qtbot, traj):
     frames = water_trajectory()
     fr = frames if traj else None
-    assert_same(tui_run(frames[0], HbondScreen(frames[0], fr), "hb"),
+    assert_same(tui_run(frames[0], lambda: HbondScreen(frames[0], fr), "hb"),
                 gui_run(qtbot, "hbonds", frames[0], fr))
 
 
@@ -168,7 +170,7 @@ def test_hbonds(qtbot, traj):
 ])
 def test_trajectory_analyses(qtbot, key, screen_cls, prefix):
     frames = water_trajectory()
-    assert_same(tui_run(frames[0], screen_cls(frames[0], frames), prefix),
+    assert_same(tui_run(frames[0], lambda: screen_cls(frames[0], frames), prefix),
                 gui_run(qtbot, key, frames[0], frames))
 
 
@@ -176,13 +178,13 @@ def test_trajectory_analyses(qtbot, key, screen_cls, prefix):
 def test_density_profile(qtbot, traj):
     frames = water_trajectory()
     fr = frames if traj else None
-    assert_same(tui_run(frames[0], DensityScreen(frames[0], fr), "dens"),
+    assert_same(tui_run(frames[0], lambda: DensityScreen(frames[0], fr), "dens"),
                 gui_run(qtbot, "density", frames[0], fr))
 
 
 def test_pxrd(qtbot):
     mol = read_file(str(HKUST))
-    assert_same(tui_run(mol, PxrdScreen(mol), "pxrd"), gui_run(qtbot, "pxrd", mol))
+    assert_same(tui_run(mol, lambda: PxrdScreen(mol), "pxrd"), gui_run(qtbot, "pxrd", mol))
 
 
 def test_energy_plot(qtbot, tmp_path):
@@ -192,7 +194,7 @@ def test_energy_plot(qtbot, tmp_path):
     path.write_text("\n".join(rows) + "\n")
     from pdb_wizard.energy import read_energy_dat
     data = read_energy_dat(str(path))
-    t = tui_run(None, EnergyPlotScreen(data, str(path)), "energy", compute=False)
+    t = tui_run(None, lambda: EnergyPlotScreen(data, str(path)), "energy", compute=False)
     dlg = EnergyDialog(data, str(path))
     qtbot.addWidget(dlg)
     assert dlg.column.currentText() == "N"  # same default column

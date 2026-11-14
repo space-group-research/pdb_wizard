@@ -431,6 +431,7 @@ def test_keyboard(hkust, qtbot):
 
 def test_hover_updates_status_and_pan(hkust, qtbot):
     v = hkust.view
+    qtbot.wait(100)  # older Qt finishes laying out the docks after the window is exposed
     image(v)
     front = int(np.argmax(v._depth))
     x, y = (int(c) for c in v._screen[front])
