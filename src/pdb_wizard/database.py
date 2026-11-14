@@ -34,6 +34,13 @@ def _http_download(url: str, out_path: str, *,
     return out_path
 
 
+def _db_file_stem(name: str) -> str:
+    """A compound name as a file name: spaces and path separators become '_' ('N/A' used
+    to fail and '../x' to leave the output folder)."""
+    stem = name.replace(" ", "_").replace("/", "_").replace("\\", "_").lstrip(".")
+    return stem or "structure"
+
+
 def fetch_cod(cod_id: str, output_dir: str = ".") -> str:
     """Fetch a CIF file from the Crystallography Open Database by ID.
 
@@ -64,7 +71,7 @@ def fetch_rcsb(pdb_id: str, output_dir: str = ".") -> str:
     return _http_download(url, out_path)
 
 
-def search_cod(formula: str = "", text: str = "") -> list[dict]:
+def search_cod(formula: str = "", text: str = "", strict: bool = False) -> list[dict]:
     """Search COD for structures matching a formula or text query.
 
     Returns list of dicts with 'id', 'formula', 'title', 'source' keys.
@@ -86,15 +93,17 @@ def search_cod(formula: str = "", text: str = "") -> list[dict]:
             results.append({
                 "source": "cod",
                 "id": str(entry.get("file", "")),
-                "formula": entry.get("formula", ""),
-                "title": entry.get("title", "")[:60],
+                "formula": entry.get("formula") or "",
+                "title": (entry.get("title") or "")[:60],  # COD sends null for no title
             })
         return results
-    except Exception:
+    except Exception as e:
+        if strict and isinstance(e, OSError):  # network down: search_backends reports it
+            raise
         return []
 
 
-def search_rcsb(query: str) -> list[dict]:
+def search_rcsb(query: str, strict: bool = False) -> list[dict]:
     """Search RCSB PDB for structures matching a text query.
 
     Returns list of dicts with 'id', 'formula', 'title', 'source' keys.
@@ -132,7 +141,9 @@ def search_rcsb(query: str) -> list[dict]:
                 "title": pdb_id,
             })
         return results
-    except Exception:
+    except Exception as e:
+        if strict and isinstance(e, OSError):
+            raise
         return []
 
 
@@ -160,11 +171,11 @@ def fetch_pubchem_sdf(name: str, output_dir: str = ".") -> str:
             "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/"
             + encoded + "/SDF?record_type=3d"
         )
-        out_path = str(Path(output_dir) / (name.replace(" ", "_") + ".sdf"))
+        out_path = str(Path(output_dir) / (_db_file_stem(name) + ".sdf"))
     return _http_download(url, out_path)
 
 
-def search_pubchem(query: str) -> list[dict]:
+def search_pubchem(query: str, strict: bool = False) -> list[dict]:
     """Search PubChem for compounds by name.
 
     Returns list of dicts with 'id' (CID), 'formula', 'title', 'source' keys.
@@ -182,15 +193,18 @@ def search_pubchem(query: str) -> list[dict]:
             results.append({
                 "source": "pubchem",
                 "id": cid,
-                "formula": prop.get("MolecularFormula", ""),
-                "title": prop.get("IUPACName", "")[:60],
+                "formula": prop.get("MolecularFormula") or "",
+                "title": (prop.get("IUPACName") or "")[:60],
             })
         return results
-    except Exception:
+    except Exception as e:
+        if strict and isinstance(e, OSError):
+            raise
         return []
 
 
-def search_materials_project(formula: str, api_key: str = "") -> list[dict]:
+def search_materials_project(formula: str, api_key: str = "",
+                             strict: bool = False) -> list[dict]:
     """Search Materials Project for structures by formula.
 
     Requires MP_API_KEY environment variable or api_key parameter.
@@ -218,7 +232,9 @@ def search_materials_project(formula: str, api_key: str = "") -> list[dict]:
                 "title": sg,
             })
         return results
-    except Exception:
+    except Exception as e:
+        if strict and isinstance(e, OSError):
+            raise
         return []
 
 
@@ -249,11 +265,15 @@ def fetch_materials_project_cif(
         f.write("_symmetry_space_group_name_H-M   'P 1'\n\n")
         f.write("loop_\n_atom_site_label\n_atom_site_type_symbol\n")
         f.write("_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n")
+        # The occupancy is written so that the CIF reader can say when a site is shared
+        # by several species (only the first one is kept here).
+        f.write("_atom_site_occupancy\n")
         for i, site in enumerate(sites):
             species = site.get("species", [{}])
             el = species[0].get("element", "X") if species else "X"
+            occupancy = species[0].get("occu", 1) if species else 1
             abc = site.get("abc", [0, 0, 0])
-            f.write(f"{el}{i+1} {el} {abc[0]:.6f} {abc[1]:.6f} {abc[2]:.6f}\n")
+            f.write(f"{el}{i+1} {el} {abc[0]:.6f} {abc[1]:.6f} {abc[2]:.6f} {occupancy}\n")
     return out_path
 
 
@@ -272,8 +292,8 @@ def fetch_materials_project_cif(
 
 def _search_cod_dispatch(query: str, mode: str = "text") -> list[dict]:
     if mode == "formula":
-        return search_cod(formula=query)
-    return search_cod(text=query)
+        return search_cod(formula=query, strict=True)
+    return search_cod(text=query, strict=True)
 
 
 BACKENDS: dict[str, dict] = {
@@ -295,7 +315,7 @@ BACKENDS: dict[str, dict] = {
             "text": "villin headpiece",
             "id": "1VII",
         },
-        "search": lambda q, mode="text": search_rcsb(q),
+        "search": lambda q, mode="text": search_rcsb(q, strict=True),
         "fetch": fetch_rcsb,
     },
     "pubchem": {
@@ -305,7 +325,7 @@ BACKENDS: dict[str, dict] = {
             "text": "aspirin",
             "id": "2244 (CID)",
         },
-        "search": lambda q, mode="text": search_pubchem(q),
+        "search": lambda q, mode="text": search_pubchem(q, strict=True),
         "fetch": fetch_pubchem_sdf,
     },
     "mp": {
@@ -315,7 +335,7 @@ BACKENDS: dict[str, dict] = {
             "formula": "Si O2",
             "id": "mp-149",
         },
-        "search": lambda q, mode="formula": search_materials_project(q),
+        "search": lambda q, mode="formula": search_materials_project(q, strict=True),
         # fetch_materials_project_cif takes (material_id, api_key, output_dir)
         # Bind api_key='' so callers pass (id, output_dir) like the others.
         "fetch": lambda mid, output_dir=".": fetch_materials_project_cif(mid, "", output_dir),

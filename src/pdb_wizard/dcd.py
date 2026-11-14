@@ -124,6 +124,19 @@ def _read_topology_elements(topo_path: str, n_expected: int) -> list[str] | None
         return None
 
 
+def _sibling_topologies(dcd_path: str) -> list:
+    """Every candidate topology next to the DCD, in the order of _find_sibling_topology:
+    same-stem files first, then the other .pdb / .pqr / .xyz files of the folder."""
+    p = Path(dcd_path)
+    found = [str(p.with_suffix(ext)) for ext in (".pdb", ".pqr", ".ent", ".xyz")
+             if p.with_suffix(ext).exists()]
+    for ext in (".pdb", ".pqr", ".xyz"):
+        for sibling in sorted(p.parent.glob(f"*{ext}")):
+            if str(sibling) not in found:
+                found.append(str(sibling))
+    return found
+
+
 def _find_sibling_topology(dcd_path: str) -> str | None:
     """Locate a topology file next to the DCD.
 
@@ -161,7 +174,8 @@ def read_dcd_trajectory(
     can warn the user.
     """
     # Resolve element list from topology
-    topology_path = topology_file or _find_sibling_topology(filepath)
+    # (the first sibling with the right atom count, not just the first sibling)
+    topology_paths = [topology_file] if topology_file else _sibling_topologies(filepath)
 
     with open(filepath, "rb") as fh:
         endian = _detect_endian(fh)
@@ -182,24 +196,33 @@ def read_dcd_trajectory(
             raise ValueError(f"DCD reports {n_atoms} atoms — invalid")
 
         # Try to fetch element symbols from topology
-        elements: list[str]
-        topology_missing = False
-        if topology_path:
+        elements: list[str] = ["C"] * n_atoms
+        topology_missing = True
+        for topology_path in topology_paths:
             els = _read_topology_elements(topology_path, n_atoms)
             if els is not None:
                 elements = els
-            else:
-                elements = ["C"] * n_atoms
-                topology_missing = True
-        else:
-            elements = ["C"] * n_atoms
-            topology_missing = True
+                topology_missing = False
+                break
 
         # Frames
         frames: list[Molecule] = []
         pbcs: list[Optional[PBC]] = []
         coords_size = n_atoms * 4
-        for fi in range(hdr["n_frames"]):
+        # A header frame count of 0 (never updated) means: read what is there.
+        n_expected = hdr["n_frames"] if hdr["n_frames"] > 0 else None
+        fi = -1
+        while n_expected is None or fi + 1 < n_expected:
+            fi += 1
+            frame_start = fh.tell()
+            try:
+                # A job still running or killed leaves a short last frame, or fewer
+                # frames than the header says: keep the complete ones.
+                for _ in range(4 if hdr["has_box"] else 3):
+                    _read_record(fh, endian)
+            except EOFError:
+                break
+            fh.seek(frame_start)
             pbc: Optional[PBC] = None
             if hdr["has_box"]:
                 box_payload = _read_record(fh, endian)
@@ -243,6 +266,8 @@ def read_dcd_trajectory(
             if progress_callback and hdr["n_frames"] > 0:
                 progress_callback((fi + 1) / hdr["n_frames"])
 
+    if not frames and hdr["n_frames"] > 0:
+        raise ValueError("The DCD file holds no complete frame")
     return frames, pbcs
 
 
@@ -254,6 +279,11 @@ def check_dcd_trajectory(filepath: str) -> bool:
             endian = _detect_endian(fh)
             header_payload = _read_record(fh, endian)
             hdr = _parse_header(header_payload, endian)
-            return hdr["n_frames"] >= 1
+            if hdr["n_frames"] >= 1:
+                return True
+            # frame count never written to the header: is there data after it?
+            _read_record(fh, endian)  # titles
+            _read_record(fh, endian)  # atom count
+            return len(fh.read(4)) == 4
     except Exception:
         return False

@@ -6,7 +6,6 @@ import copy
 import io as _io
 import logging
 import re
-import sys
 from pathlib import Path
 from typing import Callable, Optional, TextIO
 
@@ -147,6 +146,56 @@ def _mpmc_mass(atom: Atom) -> float:
     return atom.file_mass if atom.file_mass is not None else atom.mass
 
 
+def _mpmc_omega_fields(atom: Atom) -> str:
+    """The omega and gwp_alpha columns: '0.0 0.0' as always when both are zero, else the
+    values read from the file."""
+    if not atom.omega and not atom.gwp_alpha:
+        return "0.0 0.0"
+    return f"{atom.omega:.5f} {atom.gwp_alpha:.5f}"
+
+
+def _mpmc_c9_field(atom: Atom) -> str:
+    """The optional c9 column (after c10), written only when the file had a value."""
+    return f" {atom.c9:.5f}" if atom.c9 else ""
+
+
+def export_sites(mol: Molecule) -> list:
+    """(atom, element symbol) for every atom a non-MPMC file can hold.
+
+    MPMC sorbate sites are named after their model ('COG' is a carbon), so the element
+    comes from ``site_element``; massless model sites (water M, H2 centre) are left out.
+    """
+    out = []
+    for atom in mol.atoms:
+        element = site_element(atom)
+        if element is not None:
+            out.append((atom, element.symbol))
+    return out
+
+
+def lattice_to_standard(basis) -> tuple:
+    """(PBC, M) for three lattice vectors (rows) in any orientation.
+
+    The PBC always has a along x and b in the xy plane. M is None when the vectors are
+    already in that orientation; otherwise ``x @ M`` moves Cartesian positions given in the
+    vectors' frame into the PBC's frame (same fractional coordinates).
+    """
+    basis = np.array(basis, dtype=float)
+    lengths = [float(np.linalg.norm(v)) for v in basis]
+    if min(lengths) <= 0.0 or abs(np.linalg.det(basis)) < 1e-12:
+        raise ValueError("Lattice vectors are zero or coplanar")
+
+    def angle(u, v) -> float:
+        cos = np.dot(u, v) / (np.linalg.norm(u) * np.linalg.norm(v))
+        return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+
+    pbc = PBC(lengths[0], lengths[1], lengths[2], angle(basis[1], basis[2]),
+              angle(basis[0], basis[2]), angle(basis[0], basis[1]))
+    if np.abs(basis - pbc.basis_matrix).max() < 1e-6:
+        return pbc, None
+    return pbc, np.linalg.inv(basis) @ pbc.basis_matrix
+
+
 def assign_framework_charges(mol: Molecule, charges: list[float]) -> str | None:
     """Put a list of charges on the framework atoms, in order.
 
@@ -218,12 +267,22 @@ def _parse_mpmc_atom(tokens: list[str]) -> Atom:
         atom.sigma = float(tokens[13])
     except (ValueError, IndexError):
         pass
+    try:
+        atom.omega = float(tokens[14])
+        atom.gwp_alpha = float(tokens[15])
+    except (ValueError, IndexError):
+        pass
     if len(tokens) > 18:
         try:
             atom.c6 = float(tokens[16])
             atom.c8 = float(tokens[17])
             atom.c10 = float(tokens[18])
         except (ValueError, IndexError):
+            pass
+    if len(tokens) > 19:
+        try:
+            atom.c9 = float(tokens[19])
+        except ValueError:
             pass
     return atom
 
@@ -340,6 +399,10 @@ def _parse_pdb_atom(line: str, pqr: bool = False, mpmc: bool = False) -> Atom:
     """
     tokens = line.split()
 
+    if 6 < len(tokens[0]) <= 11 and tokens[0][6:].isdigit():
+        # 'HETATM10000': the serial fills its five columns, nothing has moved.
+        tokens = [tokens[0][:6], tokens[0][6:]] + tokens[1:]
+
     if len(tokens[0]) > 6:
         name = line[12:16].strip()
         nums = [t for t in _expand_numeric_tokens(line[30:].split()) if _is_decimal(t)]
@@ -353,7 +416,15 @@ def _parse_pdb_atom(line: str, pqr: bool = False, mpmc: bool = False) -> Atom:
     return _parse_standard_atom(line, tokens, pqr=pqr)
 
 
-def read_pdb(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC]]:
+def _is_placeholder_cryst1(values: list) -> bool:
+    """'CRYST1 1.000 1.000 1.000 90.00 90.00 90.00': what the PDB format prescribes for a
+    structure that is not a crystal. It is not a 1 A cell."""
+    return (all(abs(v - 1.0) < 1e-6 for v in values[:3])
+            and all(abs(v - 90.0) < 1e-6 for v in values[3:6]))
+
+
+def read_pdb(file: TextIO, filename: str = "",
+             notes: Optional[list] = None) -> tuple[list[Atom], Optional[PBC]]:
     """Read atoms and cell from a PDB / MPMC PDB / pdb2pqr PQR file.
 
     MPMC box-corner pseudo-atoms (element X in residue BOX) are dropped. Other
@@ -365,6 +436,8 @@ def read_pdb(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
     pqr = filename.lower().endswith(".pqr")
     unknown_names: dict[str, int] = {}
     skipped: list[int] = []
+    box_basis: dict[int, list] = {}
+    altlocs: set = set()
 
     lines = file.readlines()
     # A file with MPMC markers (box corners, basis remarks, or any full MPMC
@@ -389,10 +462,18 @@ def read_pdb(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
                     continue  # MPMC box corner, not an atom
                 if not _is_mpmc_dummy_site(atom):
                     unknown_names[atom.name] = unknown_names.get(atom.name, 0) + 1
+            if (not mpmc_file and len(line) > 54 and line[16] != " " and line[20] == " "
+                    and _coordinate_columns_aligned(line)):
+                altlocs.add(line[16])
             system.append(atom)
             continue
         if line[0] == "R" and line[:6] == "REMARK":
             tokens = line.split()
+            if line.startswith("REMARK BOX BASIS[") and len(tokens) >= 6:
+                try:
+                    box_basis[int(tokens[2][6])] = [float(t) for t in tokens[-3:]]
+                except (ValueError, IndexError):
+                    pass
             if len(tokens) >= 8 and tokens[1] == "carbasis":
                 try:
                     pbc = PBC(
@@ -405,15 +486,31 @@ def read_pdb(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
         if line[0] == "C" and line[:6] == "CRYST1":
             try:
                 tokens = line.split()
-                pbc = PBC(
-                    float(tokens[1]), float(tokens[2]), float(tokens[3]),
-                    float(tokens[4]), float(tokens[5]), float(tokens[6]),
-                )
+                values = [float(t) for t in tokens[1:7]]
+                if len(values) == 6 and not _is_placeholder_cryst1(values):
+                    pbc = PBC(*values)
             except (ValueError, IndexError):
                 pass
             continue
         if line[:3] == "END":
             break
+
+    if sorted(box_basis) == [0, 1, 2]:
+        # MPMC's exact cell. Its vectors may point anywhere (mpmc.inp basis1/2/3); when
+        # they are not a-along-x, b-in-xy the atoms are turned with the cell so both agree.
+        try:
+            exact, turn = lattice_to_standard([box_basis[0], box_basis[1], box_basis[2]])
+        except ValueError:
+            turn = None
+        if turn is not None:
+            pbc = exact
+            for atom in system:
+                atom.x = atom.x @ turn
+    if notes is not None and len(altlocs) > 1:
+        notes.append(
+            f"The PDB has alternate locations ({', '.join(sorted(altlocs))}). Every one was "
+            f"kept as an atom, so disordered groups appear more than once. Remove the "
+            f"extra copies before using it.")
 
     set_atom_ids(system)
     where = f" in {filename}" if filename else ""
@@ -439,7 +536,22 @@ def _xyz_atom(tokens: list[str]) -> Atom:
     return Atom(tokens[1], tokens[2], tokens[3], symbol)
 
 
-def read_xyz(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC]]:
+def _looks_like_xyz_atom(line: str) -> bool:
+    tokens = line.split()
+    if len(tokens) < 4:
+        return False
+    try:
+        float(tokens[1]), float(tokens[2]), float(tokens[3])
+    except ValueError:
+        return False
+    return True
+
+
+def read_xyz(file: TextIO, filename: str = "",
+             notes: Optional[list] = None) -> tuple[list[Atom], Optional[PBC]]:
+    """Read the first frame of an XYZ file. ``notes`` (a list) receives a sentence when the
+    atom count in the header and the atom lines disagree; the atoms read are returned
+    either way."""
     first_line = file.readline().strip()
     pbc = None
     system: list[Atom] = []
@@ -462,14 +574,22 @@ def read_xyz(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
     except ValueError:
         pass
 
+    problem = ""
     try:
         if n_atoms is not None:
             # Read exactly n_atoms lines (handles multi-frame files)
             for _ in range(n_atoms):
                 line = file.readline()
                 if not line:
+                    problem = (f"The XYZ header says {n_atoms} atoms but the file ends after "
+                               f"{len(system)}.")
                     break
                 tokens = line.split()
+                if not _looks_like_xyz_atom(line):
+                    problem = (f"XYZ atom line {len(system) + 1} could not be read "
+                               f"({line.strip()!r}); only the {len(system)} atoms before it "
+                               f"of {n_atoms} were loaded.")
+                    break
                 atom = _xyz_atom(tokens)
                 try:
                     atom.charge = float(tokens[4])
@@ -490,6 +610,17 @@ def read_xyz(file: TextIO, filename: str = "") -> tuple[list[Atom], Optional[PBC
     except (ValueError, IndexError):
         pass  # stop reading on malformed line
 
+    if n_atoms is not None and not problem and len(system) == n_atoms:
+        rest = file.readline()
+        while rest and not rest.strip():
+            rest = file.readline()
+        if rest and _looks_like_xyz_atom(rest):
+            problem = (f"The XYZ header says {n_atoms} atoms but more atom lines follow; "
+                       f"only the first {n_atoms} were loaded.")
+    if problem:
+        _log.warning(problem)
+        if notes is not None:
+            notes.append(problem)
     set_atom_ids(system)
     return system, pbc
 
@@ -597,7 +728,7 @@ def _parse_symop(expr: str) -> tuple[np.ndarray, float]:
     """
     coeffs = np.zeros(3)
     translation = 0.0
-    expr = expr.strip().replace(" ", "")
+    expr = expr.strip().replace(" ", "").lower()  # 'X,Y,Z' is as valid as 'x,y,z'
 
     i = 0
     n = len(expr)
@@ -662,6 +793,8 @@ def _apply_symops(
     symbols: list[str],
     symops: list[tuple[np.ndarray, np.ndarray]],
     tolerance: float = 0.01,
+    basis: Optional[np.ndarray] = None,
+    max_distance: float = 0.5,
 ) -> tuple[np.ndarray, list[str], list[str]]:
     """Apply symmetry operations to generate all atoms in the unit cell.
 
@@ -691,7 +824,10 @@ def _apply_symops(
                 diff = new_frac - existing
                 # Handle periodic boundary: distance across 0/1 boundary
                 diff = diff - np.round(diff)
-                if np.linalg.norm(diff) < tolerance:
+                if np.linalg.norm(diff) < tolerance and (
+                        basis is None or np.linalg.norm(diff @ basis) < max_distance):
+                    # In a large cell 0.01 fractional is more than a bond length, so two
+                    # images are also required to be closer than max_distance (A).
                     is_duplicate = True
                     break
             if not is_duplicate:
@@ -732,6 +868,7 @@ def read_cif(file: TextIO, filename: str = "",
     atom_loop_tags: list[str] = []
     atom_loop_rows: list[list[str]] = []
     _space_group: str = ""
+    extra_blocks = False
 
     i = 0
     n = len(lines)
@@ -744,8 +881,11 @@ def read_cif(file: TextIO, filename: str = "",
             i += 1
             continue
 
-        # Skip data_ block headers
+        # data_ block headers: the first block that has atoms is the structure
         if line.startswith("data_"):
+            if atom_loop_rows:
+                extra_blocks = True
+                break
             i += 1
             continue
 
@@ -762,6 +902,7 @@ def read_cif(file: TextIO, filename: str = "",
             i += 1
             loop_tags: list[str] = []
             loop_rows: list[list[str]] = []
+            loop_tokens: list[str] = []
 
             # Read tags
             while i < n:
@@ -793,13 +934,21 @@ def read_cif(file: TextIO, filename: str = "",
                         text_val += lines[i].strip() + " "
                         i += 1
                     i += 1  # skip closing semicolon
-                    # This text value belongs to the current row context, but for
-                    # atom loops this is rare; skip for simplicity
+                    loop_tokens.append(text_val.strip())
                     continue
                 tokens = _tokenize_cif_line(data_line)
                 if tokens:
                     loop_rows.append(tokens)
+                    loop_tokens.extend(tokens)
                 i += 1
+
+            # A row may be wrapped over several lines: when the values divide evenly by
+            # the number of tags, rows are cut by count instead of by line.
+            n_tags = len(loop_tags)
+            if (n_tags and loop_tokens and len(loop_tokens) % n_tags == 0
+                    and any(len(row) != n_tags for row in loop_rows)):
+                loop_rows = [loop_tokens[k:k + n_tags]
+                             for k in range(0, len(loop_tokens), n_tags)]
 
             # Identify what this loop contains
             symop_tag = None
@@ -817,6 +966,11 @@ def read_cif(file: TextIO, filename: str = "",
                     if tag_idx < len(row):
                         symops.append(row[tag_idx])
 
+            if any(tag.startswith("_atom_site.") for tag in loop_tags):
+                raise ValueError(
+                    "This is an mmCIF (PDBx) file, which is not supported. Download the "
+                    "structure as .pdb instead.")
+
             atom_tag = None
             for tag in loop_tags:
                 if tag in ("_atom_site_label", "_atom_site_type_symbol"):
@@ -831,6 +985,15 @@ def read_cif(file: TextIO, filename: str = "",
 
         # Handle key-value pairs
         tokens = _tokenize_cif_line(line)
+        if len(tokens) == 1 and tokens[0].startswith("_"):
+            # the value may be on the next line
+            j = i + 1
+            while j < n and (not lines[j].strip() or lines[j].strip().startswith("#")):
+                j += 1
+            nxt = lines[j].strip() if j < n else ""
+            if nxt and not nxt.startswith(("_", ";", "data_")) and nxt.lower() != "loop_":
+                tokens += _tokenize_cif_line(nxt)[:1]
+                i = j
         if len(tokens) >= 2 and tokens[0].startswith("_"):
             tag = tokens[0].lower()
             value = tokens[1]
@@ -894,6 +1057,10 @@ def read_cif(file: TextIO, filename: str = "",
                 f"VESTA), before using it.")
 
     # --- Phase 4: Extract atom data ---
+    if notes is not None and extra_blocks:
+        notes.append("The CIF holds more than one data block. Only the first one with atoms "
+                     "was read.")
+
     if not atom_loop_tags or not atom_loop_rows:
         return [], pbc
 
@@ -913,6 +1080,7 @@ def read_cif(file: TextIO, filename: str = "",
     symbols: list[str] = []
     frac_coords: list[np.ndarray] = []
     cart_coords: list[np.ndarray] = []
+    no_coordinates = 0
 
     for row in atom_loop_rows:
         # Get label and symbol
@@ -923,9 +1091,11 @@ def read_cif(file: TextIO, filename: str = "",
         if "_atom_site_type_symbol" in col and col["_atom_site_type_symbol"] < len(row):
             symbol = row[col["_atom_site_type_symbol"]]
 
-        # If no type_symbol, derive from label
+        # If no type_symbol, derive from label: its leading letters are the element
+        # ('C1A' is carbon 1 part A, not calcium)
         if not symbol and label:
-            symbol = "".join(c for c in label if c.isalpha())[:2]
+            lead = re.match(r"[A-Za-z]*", label).group(0)
+            symbol = (lead or "".join(c for c in label if c.isalpha()))[:2]
             # Normalize: capitalize first, lower rest
             if len(symbol) > 1:
                 symbol = symbol[0].upper() + symbol[1].lower()
@@ -937,25 +1107,30 @@ def read_cif(file: TextIO, filename: str = "",
         if not label and not symbol:
             continue
 
+        # A site without usable coordinates ('?', '.', a short row) is left out: it used
+        # to become an atom at the origin.
+        try:
+            if has_frac:
+                frac_xyz = np.array([_strip_cif_uncertainty(row[col[k]]) for k in (
+                    "_atom_site_fract_x", "_atom_site_fract_y", "_atom_site_fract_z")])
+            if has_cart:
+                cart_xyz = np.array([_strip_cif_uncertainty(row[col[k]]) for k in (
+                    "_atom_site_cartn_x", "_atom_site_cartn_y", "_atom_site_cartn_z")])
+        except (ValueError, IndexError):
+            no_coordinates += 1
+            continue
+
         labels.append(label)
         symbols.append(symbol)
-
         if has_frac:
-            try:
-                fx = _strip_cif_uncertainty(row[col["_atom_site_fract_x"]])
-                fy = _strip_cif_uncertainty(row[col["_atom_site_fract_y"]])
-                fz = _strip_cif_uncertainty(row[col["_atom_site_fract_z"]])
-                frac_coords.append(np.array([fx, fy, fz]))
-            except (ValueError, IndexError):
-                frac_coords.append(np.array([0.0, 0.0, 0.0]))
+            frac_coords.append(frac_xyz)
         if has_cart:
-            try:
-                cx = _strip_cif_uncertainty(row[col["_atom_site_cartn_x"]])
-                cy = _strip_cif_uncertainty(row[col["_atom_site_cartn_y"]])
-                cz = _strip_cif_uncertainty(row[col["_atom_site_cartn_z"]])
-                cart_coords.append(np.array([cx, cy, cz]))
-            except (ValueError, IndexError):
-                cart_coords.append(np.array([0.0, 0.0, 0.0]))
+            cart_coords.append(cart_xyz)
+
+    if notes is not None and no_coordinates:
+        notes.append(f"{no_coordinates} site{'s' if no_coordinates != 1 else ''} in the CIF "
+                     f"had no coordinates and {'were' if no_coordinates != 1 else 'was'} "
+                     f"left out.")
 
     if not labels:
         return [], pbc
@@ -994,7 +1169,7 @@ def read_cif(file: TextIO, filename: str = "",
 
         if not is_p1:
             frac_arr, labels, symbols = _apply_symops(
-                frac_arr, labels, symbols, parsed_symops
+                frac_arr, labels, symbols, parsed_symops, basis=pbc.basis_matrix
             )
 
         # Convert fractional to Cartesian
@@ -1097,14 +1272,15 @@ def _resolve_out(out: TextIO | str):
 def write_xyz(mol: Molecule, out: TextIO | str) -> None:
     fh, close = _resolve_out(out)
     try:
-        fh.write(str(len(mol.atoms)))
+        sites = export_sites(mol)  # sorbate sites by their real element, no massless ones
+        fh.write(str(len(sites)))
         if mol.pbc is not None:
             pbc = mol.pbc
             fh.write(f"\n{pbc.a} {pbc.b} {pbc.c} {pbc.alpha} {pbc.beta} {pbc.gamma}\n")
         else:
             fh.write("\n\n")
-        for atom in mol.atoms:
-            fh.write(f"{atom.element.symbol} {atom.x[0]} {atom.x[1]} {atom.x[2]}\n")
+        for atom, symbol in sites:
+            fh.write(f"{symbol} {atom.x[0]} {atom.x[1]} {atom.x[2]}\n")
     finally:
         if close:
             fh.close()
@@ -1138,10 +1314,20 @@ def write_standard_pdb(mol: Molecule, out: TextIO | str, skip_mols_step: bool = 
     # Work on a copy so we don't reorder the caller's molecule
     mol = copy.deepcopy(mol)
     pbc = mol.pbc
+    sites = export_sites(mol)
+    if len(sites) != len(mol.atoms) or any(a.element.symbol != sym for a, sym in sites):
+        # MPMC sorbate sites: write the element their mass says (the name 'COG' reads as
+        # cobalt) and leave massless model sites out. Only this copy is changed.
+        from pdb_wizard.constants import get_element
+        for atom, symbol in sites:
+            atom._element = get_element(symbol)
+        mol.atoms = [atom for atom, _ in sites]
+        mol.bonds = []
     if skip_mols_step:
         mols_list = [mol]
     else:
         mol, mols_list = sort_system(mol, output=False)
+    mols_list = [m for m in mols_list if m.atoms]  # nothing to write for an empty one
 
     fh, close = _resolve_out(out)
     out = fh
@@ -1150,7 +1336,7 @@ def write_standard_pdb(mol: Molecule, out: TextIO | str, skip_mols_step: bool = 
     out.write("AUTHOR    GENERATED BY PDB WIZARD\n")
     if pbc is not None:
         out.write(
-            f"CRYST1  {round(pbc.a, 3):>7}  {round(pbc.b, 3):7}  {round(pbc.c, 3):7} "
+            f"CRYST1{round(pbc.a, 3):>9}{round(pbc.b, 3):>9}{round(pbc.c, 3):>9} "
             f"{round(pbc.alpha, 2):>6} {round(pbc.beta, 2):>6} {round(pbc.gamma, 2):>6} "
             "P 1           1\n"
         )
@@ -1212,7 +1398,9 @@ def write_standard_pdb(mol: Molecule, out: TextIO | str, skip_mols_step: bool = 
             name = atom.name[:4]
             name_field = f" {name:<3}" if len(name) < 4 else name
             lines.append(
-                f"HETATM{atom.id:>5} {name_field} {mol_name:>3} A{idx + 1:>4}    "
+                # serial and residue number wrap so that every column stays in place
+                f"HETATM{atom.id % 100000:>5} {name_field} {mol_name:>3} "
+                f"A{(idx + 1) % 10000:>4}    "
                 f"{atom.x[0]:8.3f}{atom.x[1]:8.3f}{atom.x[2]:8.3f}"
                 f"  1.00  0.00          {atom.element.symbol:>2}\n"
             )
@@ -1275,7 +1463,7 @@ def write_mpmc_pdb(
             "MODEL        1\n",
             "COMPND    " + " " * 69 + "\n",
             "AUTHOR    GENERATED BY PDB WIZARD\n",
-            (f"CRYST1  {round(pbc.a, 3):>7}  {round(pbc.b, 3):7}  {round(pbc.c, 3):7} "
+            (f"CRYST1{round(pbc.a, 3):>9}{round(pbc.b, 3):>9}{round(pbc.c, 3):>9} "
              f"{round(pbc.alpha, 2):>6} {round(pbc.beta, 2):>6} {round(pbc.gamma, 2):>6} P 1           1\n"),
         ]
         # MOF atoms (molecule 1, frozen)
@@ -1289,7 +1477,8 @@ def write_mpmc_pdb(
                 # coefficients at full precision. The original wrote c10 with
                 # only two significant digits ({:>10.2}), e.g. 13951.5 -> 1.4e+04,
                 # which MPMC happily read as a 0.35% error.
-                f" 0.0 0.0 {atom.c6:>10.5f} {atom.c8:>11.4f} {atom.c10:>12.3f}\n"
+                f" {_mpmc_omega_fields(atom)} {atom.c6:>10.5f} {atom.c8:>11.4f} {atom.c10:>12.3f}"
+                f"{_mpmc_c9_field(atom)}\n"
             )
 
         next_atom_id = len(mol.atoms) + 1
@@ -1306,7 +1495,8 @@ def write_mpmc_pdb(
                     f"{x[0]:>10.6f} {x[1]:>10.6f} {x[2]:>10.6f}"
                     f" {_mpmc_mass(atom):>9.5f} {atom.charge:>9.5f}"
                     f" {atom.alpha:>9.5f} {atom.epsilon:>9.5f} {atom.sigma:>9.5f}"
-                    f" 0.0 0.0 {atom.c6:>10.5f} {atom.c8:>12.5f} {atom.c10:>14.5f}\n"
+                    f" {_mpmc_omega_fields(atom)} {atom.c6:>10.5f} {atom.c8:>12.5f}"
+                    f" {atom.c10:>14.5f}{_mpmc_c9_field(atom)}\n"
                 )
                 next_atom_id += 1
 
@@ -1417,42 +1607,59 @@ def read_xyz_trajectory(
 
     line = file.readline()
 
-    try:
-        while line != "" and line != "\n":
+    while True:
+        while line != "" and not line.strip():
+            line = file.readline()  # blank lines between frames or at the end
+        if line == "":
+            break
+        try:
             n_atoms = int(line)
-            pbc: Optional[PBC] = None
-            system: list[Atom] = []
+        except ValueError:
+            problem = (f"XYZ trajectory: expected an atom count at the start of frame "
+                       f"{len(molecules) + 1}, found {line.strip()!r}")
+            if not molecules:
+                raise ValueError(problem) from None
+            _log.warning(problem + "; reading stopped there")
+            break
+        pbc: Optional[PBC] = None
+        system: list[Atom] = []
+        line = file.readline()
+        try:
+            tokens = line.split()
+            if len(tokens) != 6:
+                raise ValueError
+            pbc = PBC(*[float(t) for t in tokens])
+        except ValueError:
+            if default_pbc is None:
+                default_pbc = fallback_cell()
+            pbc = copy.deepcopy(default_pbc)
+
+        for _ in range(n_atoms):
             line = file.readline()
+            tokens = line.split()
+            if not _looks_like_xyz_atom(line):
+                break
+            atom = _xyz_atom(tokens)
             try:
-                tokens = line.split()
-                if len(tokens) != 6:
-                    raise ValueError
-                pbc = PBC(*[float(t) for t in tokens])
-            except ValueError:
-                if default_pbc is None:
-                    default_pbc = fallback_cell()
-                pbc = copy.deepcopy(default_pbc)
+                atom.charge = float(tokens[4])
+            except (ValueError, IndexError):
+                pass
+            system.append(atom)
+        if len(system) < n_atoms:
+            # a job still running or killed: keep the complete frames
+            _log.warning(f"XYZ trajectory: frame {len(molecules) + 1} is incomplete "
+                         f"({len(system)} of {n_atoms} atoms); it and anything after it "
+                         f"were not loaded")
+            break
 
-            for _ in range(n_atoms):
-                line = file.readline()
-                tokens = line.split()
-                atom = _xyz_atom(tokens)
-                try:
-                    atom.charge = float(tokens[4])
-                except (ValueError, IndexError):
-                    pass
-                system.append(atom)
+        set_atom_ids(system)
+        molecules.append(Molecule(atoms=system, pbc=pbc))
+        pbcs.append(pbc)
 
-            set_atom_ids(system)
-            molecules.append(Molecule(atoms=system, pbc=pbc))
-            pbcs.append(pbc)
+        if progress_callback and file_size > 0:
+            progress_callback(file.tell() / file_size)
 
-            if progress_callback and file_size > 0:
-                progress_callback(file.tell() / file_size)
-
-            line = file.readline()
-    except (ValueError, IndexError):
-        sys.exit("Error reading XYZ trajectory")
+        line = file.readline()
 
     return molecules, pbcs
 
@@ -1590,10 +1797,10 @@ def read_file(
     load_notes: list[str] = []  # what the reader had to assume; kept on the Molecule
     if ft == "pdb":
         with open(filepath) as f:
-            system, pbc = read_pdb(f, filepath)
+            system, pbc = read_pdb(f, filepath, load_notes)
     elif ft == "xyz":
         with open(filepath) as f:
-            system, pbc = read_xyz(f, filepath)
+            system, pbc = read_xyz(f, filepath, load_notes)
     elif ft == "zmat":
         system, pbc = read_zmat(filepath)
     elif ft == "cif":
@@ -1731,6 +1938,8 @@ def read_charges_file(
         lines = f.readlines()
     if path.lower().endswith(".resp") or _looks_like_resp(lines):
         return parse_resp_charges(lines)
+    while skip_last and lines and not lines[-1].strip():
+        lines.pop()  # a trailing blank line is not the footer
     end = max(0, len(lines) - skip_last)
     used = lines[skip_first:end]
     charges: list[float] = []

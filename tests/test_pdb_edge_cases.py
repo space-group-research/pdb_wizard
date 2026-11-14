@@ -401,7 +401,10 @@ def test_sample_files_round_trip_through_standard_pdb(name, tmp_path):
     out = tmp_path / "std.pdb"
     write_standard_pdb(mol, str(out), skip_mols_step=True)
     back = read_file(str(out), remove_overlaps=False)
+    # Sorbate sites are written as the element their mass says ('COG' is a carbon, not
+    # cobalt); the samples have no massless sites, so every atom is written.
+    from pdb_wizard.io import site_element
     assert len(back.atoms) == len(mol.atoms)
-    assert [a.element.symbol for a in back.atoms] == [a.element.symbol for a in mol.atoms]
+    assert [a.element.symbol for a in back.atoms] == [site_element(a).symbol for a in mol.atoms]
     for a, b in zip(mol.atoms, back.atoms):
         assert b.x == pytest.approx(a.x, abs=5e-4)

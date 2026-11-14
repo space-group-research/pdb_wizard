@@ -742,7 +742,8 @@ class TestReadCifFracNoPbc:
 
 class TestReadCifBadCoordFallback:
     def test_bad_frac_coord(self):
-        """Unparseable fractional coordinate falls back to (0,0,0)."""
+        """A site with an unparseable coordinate is left out and noted (it used to become
+        an atom at the origin, which is a wrong structure)."""
         cif = textwrap.dedent("""\
             data_bad_coord
             _cell_length_a   10.0
@@ -761,10 +762,11 @@ class TestReadCifBadCoordFallback:
             C1  C  ???   0.50  0.60
         """)
         f = io.StringIO(cif)
-        system, pbc = read_cif(f)
-        assert len(system) == 2
-        # C1 with bad coords should fall back to (0, 0, 0) Cartesian
-        np.testing.assert_array_almost_equal(system[1].x, [0.0, 0.0, 0.0])
+        notes = []
+        system, pbc = read_cif(f, notes=notes)
+        assert [a.name for a in system] == ["O1"]
+        np.testing.assert_array_almost_equal(system[0].x, [1.0, 2.0, 3.0])
+        assert len(notes) == 1 and "no coordinates" in notes[0]
 
 
 class TestReadCifMissingLabelAndSymbol:
