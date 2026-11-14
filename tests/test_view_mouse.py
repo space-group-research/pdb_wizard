@@ -52,8 +52,12 @@ def with_view(fn):
 
 
 def test_a_fresh_view_has_its_drag_state():
-    view = MoleculeView()
-    assert view._dragging is False and view._drag_moved is False
+    # inside a running app: on Python 3.9 a widget cannot be built without an event loop
+    async def run(pilot, app, view):
+        fresh = MoleculeView()
+        return fresh._dragging, fresh._drag_moved, view._dragging, view._drag_moved
+
+    assert with_view(run) == (False, False, False, False)
 
 
 def test_release_without_a_press_is_ignored():
