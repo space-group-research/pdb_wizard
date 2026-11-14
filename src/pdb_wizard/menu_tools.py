@@ -511,7 +511,11 @@ def _cm_reduce(mol: Molecule) -> Molecule:
     na = _cm_ask_number("a", 2, int, 1)
     nb = _cm_ask_number("b", 2, int, 1)
     nc = _cm_ask_number("c", 2, int, 1)
-    framework, sorbates = identify_framework_and_sorbates(mol, na, nb, nc)
+    try:
+        framework, sorbates = identify_framework_and_sorbates(mol, na, nb, nc)
+    except ValueError as e:  # not an na x nb x nc supercell
+        print(f"\n!!! {e} !!!")
+        return mol
     print(f"\nFramework: {len(framework)} unique sites ({len(framework) * na * nb * nc} total "
           f"atoms)  |  Sorbate molecules: {len(sorbates)}")
     keep = list(range(len(sorbates)))
@@ -539,7 +543,11 @@ def _cm_reduce(mol: Molecule) -> Molecule:
                 break
             except ValueError:
                 print(f"!!! Enter all, none, or numbers from 1 to {len(sorbates)} !!!")
-    result = reduce_to_primitive(mol, na, nb, nc, keep)
+    try:
+        result = reduce_to_primitive(mol, na, nb, nc, keep)
+    except ValueError as e:
+        print(f"\n!!! {e} !!!")
+        return mol
     notes = load_notes(mol)
     if notes:
         result.load_notes = notes  # what the reader had to assume still applies
