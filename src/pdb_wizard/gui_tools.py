@@ -451,7 +451,9 @@ ANALYSES: Dict[str, AnalysisSpec] = {
          Field("tt_max", "2θ max (°)", "int", 50, 10, 90),
          Field("width", "Peak width (0.01°)", "int", 10, 1, 50)],
         lambda mol, fr, p, prog: run_pxrd(mol, p["wavelength"], float(p["tt_max"]),
-                                          p["width"] / 100.0, prog)),
+                                          p["width"] / 100.0, prog, fr, *_rng(p),
+                                          p.get("traj", False)),
+        frame_range=True, traj_default=True),
     "pore_size": AnalysisSpec(
         "Pore Size Distribution", [],
         lambda mol, fr, p, prog: run_pore_size(mol, 50000, 50, 20.0)),
