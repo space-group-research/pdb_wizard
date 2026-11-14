@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from pdb_wizard.constants import ELEMENTS
+from pdb_wizard.io import site_element
 from pdb_wizard.molecule import Molecule
 
 # Cromer-Mann coefficients for X-ray atomic scattering factors
@@ -64,8 +66,24 @@ def _atomic_form_factor(element: str, s: np.ndarray) -> np.ndarray:
     params = SCATTERING_FACTORS.get(element, _DEFAULT_SF)
     a1, b1, a2, b2, a3, b3, a4, b4, c = params
     s2 = s * s
-    return (a1 * np.exp(-b1 * s2) + a2 * np.exp(-b2 * s2) +
-            a3 * np.exp(-b3 * s2) + a4 * np.exp(-b4 * s2) + c)
+    f = (a1 * np.exp(-b1 * s2) + a2 * np.exp(-b2 * s2) +
+         a3 * np.exp(-b3 * s2) + a4 * np.exp(-b4 * s2) + c)
+    if element not in SCATTERING_FACTORS:
+        # No tabulated coefficients: the generic curve, scaled so that f(0) is the
+        # element's number of electrons (it was 12.5 for every such element).
+        z = ELEMENTS[element].atomic_number if element in ELEMENTS else 0
+        if z > 0:
+            f = f * (z / (a1 + a2 + a3 + a4 + c))
+    return f
+
+
+def pxrd_untabulated_elements(mol: Molecule) -> list:
+    """Elements in ``mol`` that have no tabulated form factor (a scaled generic curve is
+    used for them, so their peak intensities are approximate)."""
+    symbols = {el.symbol for el in (site_element(a) for a in mol.atoms) if el is not None}
+    return sorted(sym for sym in symbols
+                  if sym not in SCATTERING_FACTORS and sym in ELEMENTS
+                  and ELEMENTS[sym].atomic_number > 0)
 
 
 def compute_pxrd(
@@ -148,13 +166,15 @@ def pxrd_reflections(mol: Molecule, wavelength: float = 1.5406, two_theta_min: f
     h_max = int(np.ceil(pbc.a / d_min)) + 1
     k_max = int(np.ceil(pbc.b / d_min)) + 1
     l_max = int(np.ceil(pbc.c / d_min)) + 1
-    # Cap to reasonable range
-    h_max = min(h_max, 20)
-    k_max = min(k_max, 20)
-    l_max = min(l_max, 20)
 
-    coords = np.array([a.x for a in mol.atoms])
-    elements = np.array([a.element.symbol for a in mol.atoms])
+    # real atoms only, with their true elements: sites of MPMC sorbate models are named
+    # after the model ('COG' is carbon) and some are massless
+    sites = [(a, el) for a, el in ((a, site_element(a)) for a in mol.atoms) if el is not None]
+    if not sites:
+        empty = np.zeros(0)
+        return (empty, empty, np.zeros((0, 3), dtype=int)) if with_hkl else (empty, empty)
+    coords = np.array([a.x for a, _ in sites])
+    elements = np.array([el.symbol for _, el in sites])
     unique_elements = list(set(elements.tolist()))
 
     # Pre-compute fractional coordinates and element-grouped slices
@@ -198,10 +218,14 @@ def pxrd_reflections(mol: Molecule, wavelength: float = 1.5406, two_theta_min: f
             frac_g = el_groups[el]              # (n_el, 3)
             if len(frac_g) == 0:
                 continue
-            # phase shape: (n_refl, n_el)
-            phase = 2 * np.pi * (hkl.astype(float) @ frac_g.T)
-            cos_sum = np.cos(phase).sum(axis=1)
-            sin_sum = np.sin(phase).sum(axis=1)
+            # phase shape: (n_refl, n_el), built in slices to bound the memory
+            cos_sum = np.empty(n_refl)
+            sin_sum = np.empty(n_refl)
+            step = max(1, 4_000_000 // len(frac_g))
+            for r0 in range(0, n_refl, step):
+                phase = 2 * np.pi * (hkl[r0:r0 + step].astype(float) @ frac_g.T)
+                cos_sum[r0:r0 + step] = np.cos(phase).sum(axis=1)
+                sin_sum[r0:r0 + step] = np.sin(phase).sum(axis=1)
             f_el = f_per_el[el]                # (n_refl,)
             F_real += f_el * cos_sum
             F_imag += f_el * sin_sum

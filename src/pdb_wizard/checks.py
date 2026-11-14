@@ -136,7 +136,8 @@ def check_structure(mol: Optional[Molecule], frames: Optional[list] = None,
     for note in load_notes(mol):
         out.append(CheckFinding(CHECK_WARNING, "From the file reader", note))
 
-    unknown = sum(s == "X" for s in symbols)
+    # massless sites of sorbate models (TIP4P's M, TIP5P's LP) are not unknown atoms
+    unknown = sum(s == "X" and site_element(a) is not None for s, a in zip(symbols, atoms))
     if unknown:
         out.append(CheckFinding(CHECK_WARNING, f"{unknown} atoms have an unknown element",
                                 "Their masses and force-field parameters will be wrong."))

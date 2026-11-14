@@ -68,9 +68,12 @@ def detect_hbonds(
             dh = d_pos - h_pos
             ha = a_pos - h_pos
             if use_pbc:
-                frac = ha @ mol.pbc.reciprocal_basis_matrix
+                # the donor nearest to its H (a wrapped molecule can be split by a cell
+                # face), and the same image of the acceptor that the distance used
+                frac = dh @ mol.pbc.reciprocal_basis_matrix
                 frac -= np.round(frac)
-                ha = frac @ mol.pbc.basis_matrix
+                dh = frac @ mol.pbc.basis_matrix
+                ha = dh + diff_da
             cos_a = np.dot(dh, ha) / (np.linalg.norm(dh) * np.linalg.norm(ha) + 1e-10)
             angle = float(np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0))))
             if angle >= angle_cutoff:

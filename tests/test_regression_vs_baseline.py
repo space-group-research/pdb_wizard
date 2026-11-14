@@ -603,6 +603,12 @@ def test_info_is_unchanged(bw, structure):
         with contextlib.redirect_stdout(buf):
             mod.print_info(mol, "x")
         outs.append(buf.getvalue())
+    # Intended difference: massless sites of a movable sorbate model (the M site of a
+    # 4-site water) are no longer counted as atoms of element X in the formula. Nothing
+    # else may differ, and only for structures that have such sites.
+    if any(a.mpmc_flag == "M" and a.file_mass is not None and a.file_mass < 0.5 for a in p.atoms):
+        outs[0] = re.sub(r"^X \d+\n", "", outs[0], flags=re.M)
+        assert "\nX " not in outs[1]
     assert outs[1] == outs[0]
 
 

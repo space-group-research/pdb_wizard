@@ -369,8 +369,14 @@ def test_database_odd_results(qtbot, monkeypatch, tmp_path):
 
 def test_reduce_dialog_guards(window, qtbot):
     window.open_path(str(HKUST))
+    # a real 2 x 1 x 1 supercell: one HKUST-1 cell is not a supercell of anything, and
+    # analysing it as one is now refused (ValueError) instead of returning garbage
+    from pdb_wizard.operations import extend_axis
+    extend_axis(window.mol, 0, 1)
     dlg = ReduceCellDialog(window.mol, window)
     qtbot.addWidget(dlg)
+    for spin, value in zip(dlg.spins, (2, 1, 1)):
+        spin.setValue(value)
     dlg.analyze()
     assert dlg.reduce_button.isEnabled()
     dlg.spins[0].setValue(1)

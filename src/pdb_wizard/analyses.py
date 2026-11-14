@@ -32,7 +32,7 @@ from pdb_wizard.operations import (
     system_info,
     void_volume,
 )
-from pdb_wizard.pxrd import compute_pxrd
+from pdb_wizard.pxrd import compute_pxrd, pxrd_untabulated_elements
 from pdb_wizard.rdf import compute_rdf, compute_rdf_trajectory
 from pdb_wizard.rmsd import compute_rmsd
 
@@ -384,9 +384,15 @@ def run_pxrd(mol: Molecule, wavelength: float = 1.5406, two_theta_max: float = 5
     if len(tt) == 0:
         return AnalysisResult(summary="No reflections found")
     wl_name = "Cu Ka" if abs(wavelength - 1.5406) < 0.01 else f"{wavelength:.4f} A"
-    n_peaks = len([v for v in intensity if v > 5])
+    y = np.asarray(intensity)  # peaks: local maxima of the curve, not points above 5%
+    n_peaks = int(((y[1:-1] > 5) & (y[1:-1] > y[:-2]) & (y[1:-1] >= y[2:])).sum())
+    summary = f"{n_peaks} peaks above 5% intensity"
+    generic = pxrd_untabulated_elements(mol)
+    if generic:
+        summary += (f"  |  no tabulated form factor for {', '.join(generic)}: "
+                    f"intensities approximate")
     return AnalysisResult(tt, intensity, f"PXRD ({wl_name})", "2-theta (deg)",
-                          f"{n_peaks} peaks above 5% intensity", "two_theta_deg,intensity",
+                          summary, "two_theta_deg,intensity",
                           y_max=105.0)
 
 
