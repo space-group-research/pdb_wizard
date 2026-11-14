@@ -224,6 +224,10 @@ def _batch_convert(filepath: str, output: str) -> None:
         )
         sys.exit(1)
 
+    if not mol.atoms and suffix != ".xyz":  # .xyz has always written a 0-atom file
+        print(f"Error: could not write {output}: the structure has no atoms", file=sys.stderr)
+        sys.exit(1)
+
     existed = os.path.exists(output)
     if existed:
         print(f"Warning: overwriting existing file {output}", file=sys.stderr)
