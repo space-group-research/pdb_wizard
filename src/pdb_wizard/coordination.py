@@ -63,7 +63,8 @@ def compute_coordination(
 
     use_pbc = mol.pbc is not None
     # beyond half the cell width one image per pair is not enough
-    shifts = image_shifts(mol.pbc, r_max) @ mol.pbc.basis_matrix if use_pbc else ()
+    shifts = (image_shifts(mol.pbc, r_max, len(center_idx) * len(neighbor_idx))
+              @ mol.pbc.basis_matrix) if use_pbc else ()
 
     for ci in range(len(center_pos)):
         diffs = neighbor_pos - center_pos[ci]

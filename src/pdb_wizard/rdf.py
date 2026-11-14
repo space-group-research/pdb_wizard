@@ -18,16 +18,28 @@ def half_cell_width(pbc) -> float:
     which the minimum image finds every pair. min(a, b, c) / 2 for an orthogonal cell."""
     half = float(pbc.perpendicular_widths().min()) / 2.0
     edge = min(pbc.a, pbc.b, pbc.c) / 2.0
-    return edge if abs(half - edge) <= 1e-9 * edge else half
+    return edge if not np.isfinite(half) or abs(half - edge) <= 1e-9 * edge else half
 
 
-def image_shifts(pbc, r_max: float) -> np.ndarray:
+# Most pair distances an image sum may evaluate. A placeholder cell (CRYST1 1 1 1 around
+# thousands of atoms) would need far more; it keeps the plain minimum image, as before.
+_IMAGE_SUM_MAX_WORK = 5e9
+
+
+def image_shifts(pbc, r_max: float, n_pairs: int = 1) -> np.ndarray:
     """Lattice translations (in cell units, integer rows) needed besides the minimum image
     to reach every pair within ``r_max``; the zero shift is not included. Empty when
-    ``r_max`` is within half the smallest cell width."""
+    ``r_max`` is within half the smallest cell width (or the cell is degenerate, or the
+    sum over ``n_pairs`` pairs would be unreasonably long)."""
+    none = np.zeros((0, 3))
+    widths = pbc.perpendicular_widths()
+    if not np.all(np.isfinite(widths)) or widths.min() <= 0:
+        return none
     if r_max <= half_cell_width(pbc) * (1.0 + 1e-12):
-        return np.zeros((0, 3))
-    reach = np.ceil(r_max / pbc.perpendicular_widths() + 0.5).astype(int)
+        return none
+    reach = np.ceil(r_max / widths + 0.5).astype(int)
+    if float(np.prod(2.0 * reach + 1.0)) * n_pairs > _IMAGE_SUM_MAX_WORK:
+        return none
     grid = np.mgrid[-reach[0]:reach[0] + 1, -reach[1]:reach[1] + 1,
                     -reach[2]:reach[2] + 1].reshape(3, -1).T.astype(float)
     return grid[np.any(grid != 0, axis=1)]
@@ -82,7 +94,7 @@ def compute_rdf(
     # rows of the i x j distance matrix per block, keeping a block near 2M pairs
     block = max(1, 2_000_000 // len(idx2))
     # beyond half the cell width one image per pair is not enough
-    shifts = image_shifts(pbc, r_max) @ pbc.basis_matrix
+    shifts = image_shifts(pbc, r_max, len(idx1) * len(idx2)) @ pbc.basis_matrix
 
     for b0 in range(0, total, block):
         rows = np.arange(b0, min(b0 + block, total))

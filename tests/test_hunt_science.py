@@ -310,6 +310,16 @@ def test_rdf_default_r_max_is_half_the_smallest_perpendicular_width():
     assert r[-1] + (r[1] - r[0]) / 2 == pytest.approx(half, rel=1e-12)
 
 
+def test_placeholder_cell_keeps_the_minimum_image():
+    # CRYST1 1 1 1 around a real system: an image sum would take forever; as before,
+    # the call returns at once
+    xyz = np.random.default_rng(0).random((3000, 3)) * 30
+    mol = _mk(["Ar"] * 3000, xyz, (1, 1, 1, 90, 90, 90))
+    r, g = compute_rdf(mol, "Ar", "Ar", n_bins=20, r_max=13.0)
+    assert len(r) == 20
+    assert compute_coordination(mol, "Ar", "Ar", r_max=13.0)[2] >= 0
+
+
 def _fcc(n=5, a=4.0):
     base = np.array([[0, 0, 0], [.5, .5, 0], [.5, 0, .5], [0, .5, .5]])
     xyz = np.array([(b + np.array(s)) * a for s in itertools.product(range(n), repeat=3)
