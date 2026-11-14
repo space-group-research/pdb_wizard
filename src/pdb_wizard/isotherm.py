@@ -297,7 +297,9 @@ def generate_isotherm(
             "cell_alpha": f"{pbc.alpha:.2f}",
             "cell_beta": f"{pbc.beta:.2f}",
             "cell_gamma": f"{pbc.gamma:.2f}",
-            "temperature": f"{temperature:.1f}",
+            # one decimal as always, unless that would not be the temperature asked for
+            "temperature": (f"{temperature:.1f}" if float(f"{temperature:.1f}") == temperature
+                            else repr(float(temperature))),
             "pressure": pressure,
             "numsteps": numsteps,
             "corrtime": corrtime,
