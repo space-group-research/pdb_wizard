@@ -668,6 +668,7 @@ class VisualPanel(Widget):
             ],
             value="element",
             id="sel-colormode",
+            allow_blank=False,
         )
         yield Label("Style")
         with _NavRadioSet():

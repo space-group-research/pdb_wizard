@@ -149,3 +149,19 @@ class PBC:
             (3, 5), (3, 6),
             (4, 7), (5, 7), (6, 7),
         ]
+
+
+def cell_problem(a: float, b: float, c: float, alpha: float, beta: float, gamma: float):
+    """Why these six numbers do not describe a unit cell, or None if they do."""
+    values = (a, b, c, alpha, beta, gamma)
+    if not all(np.isfinite(v) for v in values):
+        return "Cell parameters must be finite numbers"
+    if min(a, b, c) <= 0:
+        return "Cell lengths must be positive"
+    if not all(0 < x < 180 for x in (alpha, beta, gamma)):
+        return "Cell angles must be between 0 and 180 degrees"
+    ca, cb, cg = (np.cos(np.radians(x)) for x in (alpha, beta, gamma))
+    # (V / abc)^2; zero or negative when the three angles cannot close a cell
+    if 1 - ca * ca - cb * cb - cg * cg + 2 * ca * cb * cg <= 1e-10:
+        return "These angles do not make a cell (zero or negative volume)"
+    return None
