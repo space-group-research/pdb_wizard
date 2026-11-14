@@ -333,7 +333,8 @@ def zinc(w):
 
 def test_redo_sits_under_undo_with_its_shortcuts(window):
     w = window
-    edit = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Edit")
+    top = w.menuBar().actions()  # held: older PySide6 drops a menu whose action wrapper dies
+    edit = next(a for a in top if a.text() == "&Edit").menu()
     first, second = edit.actions()[:2]
     assert first is w.undo_action and second is w.redo_action
     assert w.actions_by_name["Redo"] is w.redo_action and w.redo_action.text() == "Re&do"
@@ -1197,3 +1198,31 @@ def test_input_generator_names_the_sorbates(hkust, qtbot):
     assert dlg.values()["sorbate"] == "co2_trappe"
     assert dlg.values()["ensemble"] == "uvt"
     assert QtWidgets.QApplication.instance() is not None
+
+
+# ---- a Qt binding that loses references to None -------------------------------------------
+
+
+def test_this_qt_binding_keeps_its_references_to_none():
+    """PySide6 6.12.0 on Python older than 3.12 drops a reference to None on every call
+    that returns nothing and aborts the interpreter after a few thousand of them. The
+    package excludes that release; this fails loudly if a broken one is installed."""
+    assert not gui.qt_loses_none_references(), gui.GUI_BROKEN_QT_HINT
+
+
+def test_gui_refuses_to_start_on_a_broken_qt_binding(monkeypatch, capsys):
+    monkeypatch.setattr(gui, "qt_loses_none_references", lambda: True)
+    assert gui.run_gui(None) == 1
+    out = capsys.readouterr().out
+    assert "PySide6!=6.12.0" in out and "none_dealloc" in out
+
+
+def test_the_probe_detects_lost_references(monkeypatch):
+    import sys
+
+    if sys.version_info >= (3, 12):
+        assert gui.qt_loses_none_references() is False  # None is immortal: nothing to detect
+        return
+    counts = iter([1000, 1000 - 64])
+    monkeypatch.setattr(gui.sys, "getrefcount", lambda obj: next(counts))
+    assert gui.qt_loses_none_references() is True
