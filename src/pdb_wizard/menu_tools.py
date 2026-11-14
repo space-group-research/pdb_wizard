@@ -10,6 +10,7 @@ modules the terminal viewer and the desktop GUI call (``analyses``, ``inputgen``
 from __future__ import annotations
 
 import copy
+import math
 import os
 from typing import Callable, Dict, List, Optional
 
@@ -44,7 +45,9 @@ from pdb_wizard.analyses import (
     write_csv,
     write_energy_csv,
 )
+from pdb_wizard.atom import Atom
 from pdb_wizard.charges import apply_qeq_charges
+from pdb_wizard.checks import load_notes
 from pdb_wizard.constants import get_element
 from pdb_wizard.crystal import crystal_reduction_choice, write_crystal_d12
 from pdb_wizard.database import BACKENDS, modes_for, placeholder_for, search_backends
@@ -163,6 +166,8 @@ def _cm_ask_number(label: str, default: float, cast: Callable = float, low: floa
         raw = _cm_ask(label, default)
         try:
             value = cast(raw)
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError  # nan and inf are not numbers anyone means
             if low is not None and value < low:
                 raise ValueError
             return value
@@ -535,6 +540,9 @@ def _cm_reduce(mol: Molecule) -> Molecule:
             except ValueError:
                 print(f"!!! Enter all, none, or numbers from 1 to {len(sorbates)} !!!")
     result = reduce_to_primitive(mol, na, nb, nc, keep)
+    notes = load_notes(mol)
+    if notes:
+        result.load_notes = notes  # what the reader had to assume still applies
     print(f"\nReduced to primitive cell: {len(result.atoms)} atoms, "
           f"kept {len(keep)}/{len(sorbates)} sorbate molecules")
     return result
@@ -605,34 +613,90 @@ def cm_signature(mol: Molecule) -> tuple:
     pbc = mol.pbc
     cell = None if pbc is None else (pbc.a, pbc.b, pbc.c, pbc.alpha, pbc.beta, pbc.gamma)
     return (cell, tuple((a.element.symbol, a.name, float(a.x[0]), float(a.x[1]), float(a.x[2]),
-                         a.charge) for a in mol.atoms))
+                         a.charge, a.alpha, a.epsilon, a.sigma, a.c6, a.c8, a.c10)
+                        for a in mol.atoms))
+
+
+def _cm_snapshot(state):
+    """An independent copy of a structure (or a list of them) for undo.
+
+    copy.deepcopy takes about 12 microseconds per atom, which an old script on a large
+    trajectory pays at every wrap or cell update; copying the atoms' fields directly is
+    some fifteen times faster and copies the same things."""
+    if isinstance(state, list):
+        return [_cm_snapshot(m) for m in state]
+    new = copy.copy(state)
+    for key, value in vars(state).items():
+        if key != "atoms":
+            setattr(new, key, copy.deepcopy(value))  # cell, bonds, load notes, ...
+    atoms = []
+    for atom in state.atoms:
+        if type(atom) is not Atom:
+            atoms.append(copy.deepcopy(atom))
+            continue
+        twin = Atom.__new__(Atom)
+        for field in Atom.__slots__:
+            setattr(twin, field, getattr(atom, field))
+        twin.x = atom.x.copy()
+        atoms.append(twin)
+    new.atoms = atoms
+    return new
 
 
 class CmHistory:
-    """Undo for the classic menu: ``before`` an action, ``after`` it, ``undo`` to go back."""
+    """Undo for the classic menu: ``before`` an action, ``after`` it, ``restore`` to go back.
+
+    ``before(state, index)`` records only ``state[index]`` (one frame of a trajectory)."""
 
     def __init__(self, depth: int = 20):
         self._depth = depth
         self._stack: list = []
         self._pending = None
+        self._unrecorded = False  # the last change was too large to record
 
-    def before(self, state) -> None:
-        # Copying a very large trajectory would stall the menu, so those are not recorded.
-        frames = state if isinstance(state, list) else [state]
-        if sum(len(m.atoms) for m in frames) > CM_UNDO_MAX_ATOMS:
-            self._pending = None
+    def before(self, state, index: Optional[int] = None) -> None:
+        if self._pending is not None:  # already recorded for this action
             return
-        self._pending = (copy.deepcopy(state), self._sig(state))
+        target = state if index is None else state[index]
+        # Copying a very large structure would stall the menu, so those are not recorded.
+        # Older steps are dropped too: undoing one of them would also revert this change.
+        frames = target if isinstance(target, list) else [target]
+        if sum(len(m.atoms) for m in frames) > CM_UNDO_MAX_ATOMS:
+            self._stack = []
+            self._unrecorded = True
+            return
+        self._pending = (index, _cm_snapshot(target), self._sig(target))
 
     def after(self, state) -> None:
-        if self._pending is not None and self._pending[1] != self._sig(state):
-            self._stack.append(self._pending[0])
-            del self._stack[:-self._depth]
+        if self._pending is not None:
+            index, snapshot, signature = self._pending
+            target = state if index is None else state[index]
+            if signature != self._sig(target):
+                self._stack.append((index, snapshot))
+                del self._stack[:-self._depth]
+                self._unrecorded = False
         self._pending = None
 
     def undo(self):
-        """The previous state, or None when there is nothing to undo."""
-        return self._stack.pop() if self._stack else None
+        """The previous whole state, or None when there is nothing to undo."""
+        return self._stack.pop()[1] if self._stack else None
+
+    def restore(self, state):
+        """``state`` with the last change undone, or None when there is nothing to undo."""
+        if not self._stack:
+            return None
+        index, snapshot = self._stack.pop()
+        if index is None:
+            return snapshot
+        state[index] = snapshot
+        return state
+
+    def nothing_to_undo(self) -> str:
+        """Why ``restore`` returned None."""
+        if self._unrecorded:
+            return (f"Undo is not available: changes to more than {CM_UNDO_MAX_ATOMS:,} atoms "
+                    f"are not recorded")
+        return "Nothing to undo"
 
     @staticmethod
     def _sig(state) -> tuple:

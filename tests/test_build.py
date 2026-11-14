@@ -46,6 +46,20 @@ def _referenced_submodules() -> set[str]:
     return refs
 
 
+def _minified_path() -> Path:
+    """dist/pdb_wizard.min.py. build.py does not write it when the minifier's output would
+    not run on the oldest supported Python (it does that when run on Python 3.12+); the
+    build must then say so, and the tests about the minified file have nothing to check."""
+    path = DIST_DIR / "pdb_wizard.min.py"
+    if not path.exists():
+        result = subprocess.run([sys.executable, str(BUILD_DIR / "build.py")],
+                                capture_output=True, text=True, cwd=str(BUILD_DIR))
+        assert "Minified build skipped" in result.stdout, (
+            "dist/pdb_wizard.min.py not found and the build does not say why")
+        pytest.skip("this Python's minifier output would not run on the oldest supported one")
+    return path
+
+
 class TestBuild:
     def test_build_runs(self):
         """Build script completes without error."""
@@ -64,21 +78,19 @@ class TestBuild:
 
     def test_minified_file_compiles(self):
         """dist/pdb_wizard.min.py compiles without syntax errors."""
-        path = DIST_DIR / "pdb_wizard.min.py"
-        assert path.exists(), "dist/pdb_wizard.min.py not found — run build.py first"
+        path = _minified_path()
         source = path.read_text()
         compile(source, str(path), "exec")
 
     def test_minified_has_shebang(self):
-        path = DIST_DIR / "pdb_wizard.min.py"
-        assert path.exists()
+        path = _minified_path()
         first_line = path.read_text().split("\n")[0]
         assert first_line.startswith("#!/usr/bin/env python")
 
     def test_minified_is_smaller(self):
         full = DIST_DIR / "pdb_wizard.py"
-        mini = DIST_DIR / "pdb_wizard.min.py"
-        assert full.exists() and mini.exists()
+        mini = _minified_path()
+        assert full.exists()
         assert mini.stat().st_size < full.stat().st_size
 
     def test_no_internal_imports_in_amalgamated(self):

@@ -63,6 +63,23 @@ from pdb_wizard.sorbates import format_inserted_sorbates
 from pdb_wizard.trajectory import read_trajectory
 
 
+class _CmEditScope:
+    """Set by the main menus while geometry analysis or the MPMC writer runs, so those can
+    record an undo step just before they change the structure (and only then)."""
+
+    about_to_change = None
+
+
+def _cm_about_to_change() -> None:
+    if _CmEditScope.about_to_change is not None:
+        _CmEditScope.about_to_change()
+
+
+def _cm_write_failed(error: OSError) -> None:
+    """An output file could not be written: say so and go back to the menu."""
+    print(f"!!! Error: could not write the file: {error} !!!")
+
+
 def _list_coords(mol: Molecule) -> None:
     for atom in mol.atoms:
         print(f"{atom.element.symbol} {atom.x}")
@@ -177,12 +194,16 @@ def _write_mpmc_options(mol: Molecule) -> None:
             )
             try:
                 charges = read_charges_file(charges_filename)
+                _cm_about_to_change()
                 problem = assign_framework_charges(mol, charges)
                 if problem:
                     raise ValueError(problem)
                 break
             except (TypeError, ValueError, FileNotFoundError) as e:
                 print(f"!!! Error reading charges: {e} !!!")
+            except OSError as e:  # a folder, no permission: back to the main menu
+                print(f"!!! Error reading charges: {e} !!!")
+                return
 
     while True:
         try:
@@ -214,6 +235,7 @@ def _write_mpmc_options(mol: Molecule) -> None:
                     raise ValueError
                 if ff_idx not in (0, 1):
                     raise ValueError
+                _cm_about_to_change()
                 _, missing = apply_ff_to_system_report(mol.atoms, get_forcefield(ff_idx))
                 for msg in missing_ff_messages(missing):
                     print(msg)
@@ -222,7 +244,11 @@ def _write_mpmc_options(mol: Molecule) -> None:
                 print("!!! Error reading input !!!")
 
     filename = input("\noutput filename > ")
-    write_mpmc_pdb(mol, filename, write_charges=write_charges, write_params=write_ff)
+    try:
+        write_mpmc_pdb(mol, filename, write_charges=write_charges, write_params=write_ff)
+    except OSError as e:
+        _cm_write_failed(e)
+        return
     print(f"\nwrote {filename}\n")
 
 
@@ -268,6 +294,7 @@ def _menu_geom_analysis(mol: Molecule) -> Molecule:
                     print(f"{atom.element.symbol:>3} {atom.id:>5} {atom.x}")
         elif option == 5:
             caution = lone_atom_warning(mol)
+            _cm_about_to_change()
             mol, deleted = remove_lone_atoms(mol)
             if deleted and caution:
                 print(f"\n!!! Warning: {caution} (main menu 17 undoes this) !!!")
@@ -295,6 +322,7 @@ def _menu_geom_analysis(mol: Molecule) -> Molecule:
                     break
                 except ValueError:
                     print("!!! Error finding element or reading distance !!!")
+            _cm_about_to_change()
             mol, messages = adjust_h_distances(mol, el, dist)
             if not messages:
                 print(f"\nNo {el}-H bonds found\n")
@@ -338,6 +366,25 @@ def _prompt_open_file() -> str | None:
     except ValueError as e:
         print(f"!!! Error: {e} !!!")
         return None
+    return _cm_preload(path)
+
+
+# Structures read by "open another file" / the database menu before the current one is
+# given up, keyed by path; _run_classic_file takes them from here.
+_CM_PRELOADED: dict = {}
+
+
+def _cm_preload(path: str) -> str | None:
+    """Read ``path`` now. Returns it when it loaded (the menu then switches to it), or
+    prints why not and returns None so the menu stays on the current structure."""
+    try:
+        _CM_PRELOADED[path] = _load_classic_file(path)
+    except SystemExit as e:  # the readers' own "could not read" exits
+        print(f"!!! Error: {e.code if isinstance(e.code, str) else 'could not read ' + path} !!!")
+        return None
+    except (OSError, ValueError) as e:
+        print(f"!!! Error: could not read {path}: {e} !!!")
+        return None
     return path
 
 
@@ -366,10 +413,15 @@ def _main_loop_single(mol: Molecule, filename: str) -> str | None:
         except ValueError:
             print("!!! Error converting input to int !!!")
             continue
-        if option in (1, 2, 3, 4, 5, 12):
+        if option in (2, 3, 4, 5, 12):
             history.before(mol)
+        elif option in (1, 7):  # recorded only if (and just before) they change something
+            _CmEditScope.about_to_change = lambda: history.before(mol)
         if option == 1:
-            mol = _menu_geom_analysis(mol)
+            try:
+                mol = _menu_geom_analysis(mol)
+            finally:
+                _CmEditScope.about_to_change = None
         elif option == 2:
             mol = _menu_extend_axis(mol)
         elif option == 3:
@@ -384,16 +436,25 @@ def _main_loop_single(mol: Molecule, filename: str) -> str | None:
                 mol.bonds = []  # bonds depend on the cell; recompute lazily
         elif option == 6:
             out_filename = input("\noutput filename > ")
-            with open(out_filename, "w") as out:
-                write_xyz(mol, out)
-            print(f"wrote {out_filename}")
+            try:
+                with open(out_filename, "w") as out:
+                    write_xyz(mol, out)
+                print(f"wrote {out_filename}")
+            except OSError as e:
+                _cm_write_failed(e)
         elif option == 7:
-            _write_mpmc_options(mol)
+            try:
+                _write_mpmc_options(mol)
+            finally:
+                _CmEditScope.about_to_change = None
         elif option == 8:
             out_filename = input("\noutput filename > ")
-            with open(out_filename, "w") as out:
-                write_standard_pdb(mol, out)
-            print(f"wrote {out_filename}")
+            try:
+                with open(out_filename, "w") as out:
+                    write_standard_pdb(mol, out)
+                print(f"wrote {out_filename}")
+            except OSError as e:
+                _cm_write_failed(e)
         elif option == 9:
             return None
         elif option == 10:
@@ -410,12 +471,12 @@ def _main_loop_single(mol: Molecule, filename: str) -> str | None:
             cm_menu_isotherm()
         elif option == 16:
             path = cm_menu_database()
-            if path:
+            if path and _cm_preload(path):
                 return path
         elif option == 17:
-            previous = history.undo()
+            previous = history.restore(mol)
             if previous is None:
-                print("\nNothing to undo")
+                print("\n" + history.nothing_to_undo())
             else:
                 mol = previous
                 print("\nUndid the last change")
@@ -425,7 +486,7 @@ def _main_loop_single(mol: Molecule, filename: str) -> str | None:
                 return path
         else:
             print("\nInvalid option!")
-        if option in (1, 2, 3, 4, 5, 12):
+        if option in (1, 2, 3, 4, 5, 7, 12):
             history.after(mol)
 
 
@@ -444,7 +505,11 @@ def _menu_insert_sorbates(mol: Molecule) -> None:
     lines = format_inserted_sorbates(model, placed, start_atom_id=len(mol.atoms) + 1,
                                      start_mol_id=next_mpmc_mol_id(mol))
     filename = input("\noutput filename > ")
-    write_mpmc_pdb(mol, filename, sorbate_lines=lines)
+    try:
+        write_mpmc_pdb(mol, filename, sorbate_lines=lines)
+    except OSError as e:
+        _cm_write_failed(e)
+        return
     print(f"\nwrote {filename}\n")
 
 
@@ -472,12 +537,17 @@ def _main_loop_movie(molecules: list[Molecule], filename: str) -> str | None:
         except ValueError:
             print("!!! Error converting input to int !!!")
             continue
-        if option in (1, 2, 3, 4, 5, 12):
+        if option in (2, 3, 4, 5):
             history.before(molecules)
         if option == 1:
             idx = _prompt_frame(n)
             if idx is not None:
-                molecules[idx] = _menu_geom_analysis(molecules[idx])
+                # only this frame can change, and only if the user edits it
+                _CmEditScope.about_to_change = lambda: history.before(molecules, idx)
+                try:
+                    molecules[idx] = _menu_geom_analysis(molecules[idx])
+                finally:
+                    _CmEditScope.about_to_change = None
         elif option == 2:
             if molecules[0].pbc is None:
                 print("No PBC data available")
@@ -507,20 +577,30 @@ def _main_loop_movie(molecules: list[Molecule], filename: str) -> str | None:
                 print(f"\nUpdated cell dimensions in all {n} frames")
         elif option == 6:
             out_filename = input("\noutput filename > ")
-            with open(out_filename, "w") as out:
-                for m in molecules:
-                    write_xyz(m, out)
-            print(f"wrote {n} frames to {out_filename}")
+            try:
+                with open(out_filename, "w") as out:
+                    for m in molecules:
+                        write_xyz(m, out)
+                print(f"wrote {n} frames to {out_filename}")
+            except OSError as e:
+                _cm_write_failed(e)
         elif option == 7:
             idx = _prompt_frame(n)
             if idx is not None:
-                _write_mpmc_options(molecules[idx])
+                _CmEditScope.about_to_change = lambda: history.before(molecules, idx)
+                try:
+                    _write_mpmc_options(molecules[idx])
+                finally:
+                    _CmEditScope.about_to_change = None
         elif option == 8:
             out_filename = input("\noutput filename > ")
-            with open(out_filename, "w") as out:
-                for m in molecules:
-                    write_standard_pdb(m, out)
-            print(f"wrote {n} frames to {out_filename}")
+            try:
+                with open(out_filename, "w") as out:
+                    for m in molecules:
+                        write_standard_pdb(m, out)
+                print(f"wrote {n} frames to {out_filename}")
+            except OSError as e:
+                _cm_write_failed(e)
         elif option == 9:
             return None
         elif option == 10:
@@ -532,6 +612,7 @@ def _main_loop_movie(molecules: list[Molecule], filename: str) -> str | None:
         elif option == 12:
             idx = _prompt_frame(n)
             if idx is not None:
+                history.before(molecules, idx)
                 molecules[idx] = cm_menu_edit(molecules[idx])
         elif option == 13:
             idx = _prompt_frame(n)
@@ -545,12 +626,12 @@ def _main_loop_movie(molecules: list[Molecule], filename: str) -> str | None:
             cm_menu_isotherm()
         elif option == 16:
             path = cm_menu_database()
-            if path:
+            if path and _cm_preload(path):
                 return path
         elif option == 17:
-            previous = history.undo()
+            previous = history.restore(molecules)
             if previous is None:
-                print("\nNothing to undo")
+                print("\n" + history.nothing_to_undo())
             else:
                 molecules = previous
                 print("\nUndid the last change")
@@ -560,18 +641,38 @@ def _main_loop_movie(molecules: list[Molecule], filename: str) -> str | None:
                 return path
         else:
             print("\nInvalid option!")
-        if option in (1, 2, 3, 4, 5, 12):
+        if option in (1, 2, 3, 4, 5, 7, 12):
             history.after(molecules)
 
 
 def run_classic(filename: str) -> None:
     """Run the menu on ``filename``, then on any file the user opens from it."""
     next_file: str | None = filename
-    while next_file:
-        next_file = _run_classic_file(next_file)
+    try:
+        while next_file:
+            next_file = _run_classic_file(next_file)
+    except EOFError:
+        # stdin closed mid-prompt (a script without its final "9"): no traceback, still code 1
+        print("\nInput ended before the menu was quit; exiting.", file=sys.stderr)
+        sys.exit(1)
 
 
 def _run_classic_file(filename: str) -> str | None:
+    if filename in _CM_PRELOADED:
+        kind, data = _CM_PRELOADED.pop(filename)
+    else:
+        try:
+            kind, data = _load_classic_file(filename)
+        except (OSError, UnicodeDecodeError) as e:
+            sys.exit(f"Could not read {filename}: {e}")
+    if kind == "movie":
+        return _main_loop_movie(data, filename)
+    return _main_loop_single(data, filename)
+
+
+def _load_classic_file(filename: str) -> tuple:
+    """Read ``filename`` (asking for a cell if it has none). Returns ("movie", frames) or
+    ("single", molecule)."""
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     is_trajectory = False
@@ -598,7 +699,7 @@ def _run_classic_file(filename: str) -> str | None:
                 molecules, pbcs = read_pdb_trajectory(f)
         else:
             molecules = read_trajectory(filename)
-        return _main_loop_movie(molecules, filename)
+        return "movie", molecules
 
     if other_format:
         try:
@@ -635,4 +736,4 @@ def _run_classic_file(filename: str) -> str | None:
     if file_notes:
         mol.load_notes = file_notes  # so Check Structure repeats them
     mol.detect_bonds()
-    return _main_loop_single(mol, filename)
+    return "single", mol
