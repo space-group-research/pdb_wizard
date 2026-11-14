@@ -366,7 +366,10 @@ def _cm_run_analysis(key: str, mol: Molecule, frames: Optional[list], filename: 
                                     1.5406, float, 0.01)
         tt_max = _cm_ask_number("Maximum 2-theta (deg)", 50.0, float, 5.1)
         width = _cm_ask_number("Peak width (deg)", 0.10, float, 0.001)
-        _cm_show(run_pxrd(mol, wavelength, tt_max, width))
+        use_traj = traj and _cm_ask_yes("Average over the trajectory?", True)
+        start, end = _cm_ask_range(frames) if use_traj else (1, None)
+        _cm_show(run_pxrd(mol, wavelength, tt_max, width, frames=frames, start=start, end=end,
+                          use_traj=use_traj))
     elif key == "energy_plot":
         _cm_energy(filename)
 
