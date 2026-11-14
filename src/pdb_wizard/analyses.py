@@ -33,7 +33,7 @@ from pdb_wizard.operations import (
     system_info,
     void_volume,
 )
-from pdb_wizard.pxrd import compute_pxrd, pxrd_untabulated_elements
+from pdb_wizard.pxrd import compute_pxrd, pxrd_raw_pattern, pxrd_untabulated_elements
 from pdb_wizard.rdf import compute_rdf, compute_rdf_trajectory
 from pdb_wizard.rmsd import compute_rmsd
 
@@ -379,23 +379,70 @@ def run_density_profile(mol: Molecule, element: str, name: str = ALL_ATOMS, axis
                           "position_A,density", y_max=_grow(dens))
 
 
+def _pxrd_frame_average(frames: list, wavelength: float, two_theta_max: float,
+                        peak_width: float,
+                        progress: Optional[Callable[[float], None]]) -> tuple:
+    """(2-theta, pattern, frames used): the mean of the frames' un-normalised patterns,
+    each with its own cell, scaled so the highest point is 100. Frames without a real
+    cell are left out."""
+    used: list = []
+    x, total = np.array([]), None
+    for i, frame in enumerate(frames):
+        if frame.pbc is not None and not is_fallback_cell(frame.pbc):
+            used.append(frame)
+            fx, fy = pxrd_raw_pattern(frame, wavelength=wavelength,
+                                      two_theta_max=two_theta_max, peak_width=peak_width)
+            if len(fy):
+                x, total = fx, (fy if total is None else total + fy)
+        if progress:
+            progress((i + 1) / len(frames))
+    if total is None:
+        return np.array([]), np.array([]), used
+    mean = total / len(used)  # frames with a cell but no reflections count as zero
+    if mean.max() > 0:
+        mean = mean / mean.max() * 100
+    return x, mean, used
+
+
 def run_pxrd(mol: Molecule, wavelength: float = 1.5406, two_theta_max: float = 50.0,
              peak_width: float = 0.10,
-             progress: Optional[Callable[[float], None]] = None) -> AnalysisResult:
-    tt, intensity = compute_pxrd(mol, wavelength=wavelength, two_theta_max=two_theta_max,
-                                 peak_width=peak_width, progress_callback=progress)
+             progress: Optional[Callable[[float], None]] = None,
+             frames: Optional[list] = None, start: int = 1, end: Optional[int] = None,
+             use_traj: bool = False) -> AnalysisResult:
+    wl_name = "Cu Ka" if abs(wavelength - 1.5406) < 0.01 else f"{wavelength:.4f} A"
+    title, note, generic = f"PXRD ({wl_name})", "", None
+    if use_traj and frames and len(frames) > 1:
+        empty = _empty_window(frames, start, end)
+        if empty:
+            return empty
+        sub = frame_slice(frames, start, end)
+        first = max(start, 1)
+        span = f"frames {first}-{first + len(sub) - 1}"
+        tt, intensity, used = _pxrd_frame_average(sub, wavelength, two_theta_max, peak_width,
+                                                  progress)
+        if not used:
+            return AnalysisResult(summary=f"No unit cell in {span}: "
+                                          f"PXRD needs a crystal structure")
+        title = f"PXRD ({wl_name}, {span})"
+        if len(used) < len(sub):
+            note = (f"  |  {len(sub) - len(used)} of {len(sub)} frames have no unit cell "
+                    f"and were left out")
+        generic = sorted(set().union(*(pxrd_untabulated_elements(f) for f in used)))
+    else:
+        tt, intensity = compute_pxrd(mol, wavelength=wavelength, two_theta_max=two_theta_max,
+                                     peak_width=peak_width, progress_callback=progress)
     if len(tt) == 0:
         return AnalysisResult(summary="No reflections found")
-    wl_name = "Cu Ka" if abs(wavelength - 1.5406) < 0.01 else f"{wavelength:.4f} A"
     y = np.asarray(intensity)  # peaks: local maxima of the curve, not points above 5%
     n_peaks = int(((y[1:-1] > 5) & (y[1:-1] > y[:-2]) & (y[1:-1] >= y[2:])).sum())
     summary = f"{n_peaks} peaks above 5% intensity"
-    generic = pxrd_untabulated_elements(mol)
+    if generic is None:
+        generic = pxrd_untabulated_elements(mol)
     if generic:
         summary += (f"  |  no tabulated form factor for {', '.join(generic)}: "
                     f"intensities approximate")
-    return AnalysisResult(tt, intensity, f"PXRD ({wl_name})", "2-theta (deg)",
-                          summary, "two_theta_deg,intensity",
+    return AnalysisResult(tt, intensity, title, "2-theta (deg)",
+                          summary + note, "two_theta_deg,intensity",
                           y_max=105.0)
 
 

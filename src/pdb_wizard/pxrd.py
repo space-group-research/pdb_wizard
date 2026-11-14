@@ -112,6 +112,30 @@ def compute_pxrd(
     Returns:
         (two_theta, intensity) arrays.
     """
+    two_theta_arr, pattern = pxrd_raw_pattern(mol, wavelength, two_theta_min, two_theta_max,
+                                              n_points, peak_width, progress_callback)
+
+    # Normalize to max = 100
+    if len(pattern) and pattern.max() > 0:
+        pattern = pattern / pattern.max() * 100
+
+    return two_theta_arr, pattern
+
+
+def pxrd_raw_pattern(
+    mol: Molecule,
+    wavelength: float = 1.5406,
+    two_theta_min: float = 5.0,
+    two_theta_max: float = 50.0,
+    n_points: int = 2000,
+    peak_width: float = 0.1,
+    progress_callback=None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """compute_pxrd's pattern before it is scaled to a maximum of 100: the summed
+    Gaussian-broadened intensities on ``linspace(two_theta_min, two_theta_max, n_points)``.
+    Empty arrays without a cell, atoms or reflections in range. Patterns of trajectory
+    frames are averaged in this form (intensities, not amplitudes) and scaled afterwards.
+    """
     if mol.pbc is None or len(mol.atoms) == 0:
         return np.array([]), np.array([])
 
@@ -134,10 +158,6 @@ def compute_pxrd(
     for tt, intensity in reflections:
         peak = intensity * np.exp(-0.5 * ((two_theta_arr - tt) / sigma) ** 2)
         pattern += peak
-
-    # Normalize to max = 100
-    if pattern.max() > 0:
-        pattern = pattern / pattern.max() * 100
 
     return two_theta_arr, pattern
 

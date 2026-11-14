@@ -2715,11 +2715,12 @@ class PxrdScreen(_AnalysisScreen):
     DEFAULT_CSS = _ANALYSIS_CSS.format(cls="PxrdScreen") + """
     PxrdScreen Select { width: 14; }
     PxrdScreen #pxrd-controls { height: auto; margin-bottom: 1; }
+    PxrdScreen #pxrd-row2 { height: auto; margin-bottom: 1; }
     PxrdScreen #pxrd-status { height: 1; color: $text-muted; }
     """
 
-    def __init__(self, molecule: Molecule) -> None:
-        super().__init__(molecule, None)
+    def __init__(self, molecule: Molecule, frames: list | None = None) -> None:
+        super().__init__(molecule, frames)
         self._last_tt = np.array([])
         self._last_intensity = np.array([])
 
@@ -2737,6 +2738,10 @@ class PxrdScreen(_AnalysisScreen):
                 yield Button("Load Exp.", id="pxrd-load-exp")
                 yield Button("CSV", id="pxrd-csv")
                 yield Button("Close", id="pxrd-close")
+            if self._frames and len(self._frames) > 1:
+                with Horizontal(id="pxrd-row2"):  # own row: row 1 still fits 120 columns
+                    yield Checkbox("Traj", value=True, id="pxrd-traj")
+                    yield from self._yield_frame_range()
             yield PlotWidget(id="pxrd-plot")
             yield Label("Select parameters and click Compute  |  Load Exp. to overlay experimental data", id="pxrd-status")
 
@@ -2760,6 +2765,14 @@ class PxrdScreen(_AnalysisScreen):
         wl = float(self.query_one("#pxrd-wl", Select).value)
         tt_max = float(self.query_one("#pxrd-ttmax", SpinBox).value)
         width = self.query_one("#pxrd-width", SpinBox).value / 100.0  # hundredths to degrees
+        use_traj = False
+        try:
+            use_traj = bool(self.query_one("#pxrd-traj", Checkbox).value
+                            and self._frames and len(self._frames) > 1)
+        except Exception:
+            pass
+        start, end = self._frame_range() if use_traj else (1, None)
+        n_total = len(self._get_frame_slice() or []) if use_traj else 1
         status = self.query_one("#pxrd-status", Label)
         status.update("Computing PXRD pattern...")
         self._rdf_progress = [0.0]
@@ -2767,12 +2780,18 @@ class PxrdScreen(_AnalysisScreen):
         def _prog(frac):
             self._rdf_progress[0] = frac
 
-        poll = self.set_interval(0.1, lambda: status.update(
-            f"Computing PXRD... {int(self._rdf_progress[0] * 100)}%"
-        ))
+        def _update_status() -> None:
+            frac = self._rdf_progress[0]
+            if use_traj:
+                status.update(f"Computing PXRD... frame {int(frac * n_total)}/{n_total}")
+            else:
+                status.update(f"Computing PXRD... {int(frac * 100)}%")
+
+        poll = self.set_interval(0.1, _update_status)
         await asyncio.sleep(0)
         try:
-            res = await asyncio.to_thread(run_pxrd, self._molecule, wl, tt_max, width, _prog)
+            res = await asyncio.to_thread(run_pxrd, self._molecule, wl, tt_max, width, _prog,
+                                          self._frames, start, end, use_traj)
         finally:
             poll.stop()
         if res.empty:
@@ -5371,7 +5390,7 @@ class PdbWizardApp(App):
             if len(mol.atoms) == 0 or not self._has_real_cell(mol):
                 self.notify("Need a crystal structure with PBC for PXRD", timeout=3)
                 return
-            self.push_screen(PxrdScreen(mol))
+            self.push_screen(PxrdScreen(mol, self._frames))
             return
 
         elif cmd == "density3d":
