@@ -22,6 +22,7 @@ MODULE_ORDER = [
     "molecule",
     "io",
     "dcd",
+    "ase_traj",
     "trajectory",
     "geometry",
     "checks",

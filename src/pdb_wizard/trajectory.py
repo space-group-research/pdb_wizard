@@ -8,7 +8,7 @@ from pdb_wizard.molecule import Molecule
 
 
 def is_trajectory_file(filepath: str) -> bool:
-    """True for multi-frame PDB/XYZ files and readable DCD files."""
+    """True for multi-frame PDB/XYZ files and readable DCD and ASE .traj files."""
     from pdb_wizard.io import check_pdb_trajectory, check_xyz_trajectory, detect_filetype
     ft = detect_filetype(filepath)
     if ft == "pdb":
@@ -18,17 +18,24 @@ def is_trajectory_file(filepath: str) -> bool:
     if ft == "dcd":
         from pdb_wizard.dcd import check_dcd_trajectory
         return check_dcd_trajectory(filepath)
+    if ft == "ase_traj":
+        from pdb_wizard.ase_traj import check_ase_trajectory
+        return check_ase_trajectory(filepath)
     return False
 
 
 def read_trajectory(filepath: str,
                     progress: Optional[Callable[[float], None]] = None) -> List[Molecule]:
-    """All frames of a PDB, XYZ or DCD trajectory."""
+    """All frames of a PDB, XYZ, DCD or ASE .traj trajectory."""
     from pdb_wizard.io import detect_filetype, read_pdb_trajectory, read_xyz_trajectory
     ft = detect_filetype(filepath)
     if ft == "dcd":
         from pdb_wizard.dcd import read_dcd_trajectory
         mols, _ = read_dcd_trajectory(filepath, progress_callback=progress)
+        return mols
+    if ft == "ase_traj":
+        from pdb_wizard.ase_traj import read_ase_trajectory
+        mols, _ = read_ase_trajectory(filepath, progress_callback=progress)
         return mols
     with open(filepath) as f:
         if ft == "pdb":
