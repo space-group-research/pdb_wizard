@@ -147,7 +147,7 @@ _CELL_FORMATS = (".pqr", ".cif", ".vasp", ".poscar", ".d12")  # cannot be writte
 _SAVE_FILTER = ("MPMC (*.pqr);;PDB (*.pdb);;XYZ (*.xyz);;CIF (*.cif);;"
                 "POSCAR (*.vasp *.poscar);;LAMMPS data (*.lmp *.data);;CRYSTAL23 input (*.d12)")
 _OPEN_FILTER = ("Structures (*.pdb *.pqr *.ent *.cif *.xyz *.vasp *.poscar POSCAR CONTCAR "
-                "*.lmp *.data *.sdf *.mol2 *.log *.com *.gjf *.zmat *.dcd *.out);;All files (*)")
+                "*.lmp *.data *.sdf *.mol2 *.log *.com *.gjf *.zmat *.dcd *.traj *.out);;All files (*)")
 _FORCE_FIELDS = [("None", None), ("OPLS-AA / UFF", 0), ("PHAHST", 1)]
 _DUMMY_RADIUS = 0.15  # A, drawn size of massless model sites (water M/LP, H2 centres)
 

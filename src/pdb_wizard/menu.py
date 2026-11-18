@@ -685,7 +685,7 @@ def _load_classic_file(filename: str) -> tuple:
     else:
         # Formats the original menu could not read (.cif, POSCAR, LAMMPS data, .dcd, ...)
         try:
-            other_format = detect_filetype(filename) != "dcd"
+            other_format = detect_filetype(filename) not in ("dcd", "ase_traj")
         except ValueError:
             sys.exit("Unable to determine if input file is xyz or pdb (please rename)")
         is_trajectory = not other_format

@@ -483,6 +483,11 @@ def main() -> None:
                 is_traj = check_dcd_trajectory(args.file)
                 if not is_traj:
                     parser.error(f"{args.file} is not a readable DCD trajectory")
+            elif ft == "ase_traj":
+                from pdb_wizard.ase_traj import check_ase_trajectory
+                is_traj = check_ase_trajectory(args.file)
+                if not is_traj:
+                    parser.error(f"{args.file} is not a readable ASE trajectory")
 
             if is_traj:
                 # Launch app empty, load trajectory in background

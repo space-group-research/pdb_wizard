@@ -1774,6 +1774,8 @@ def detect_filetype(filepath: str) -> str:
         return "mol2"
     if suffix == ".dcd":
         return "dcd"
+    if suffix == ".traj":
+        return "ase_traj"
     if suffix == ".out":
         return "crystal_out"
     raise ValueError(f"Unsupported file format: {suffix}")
@@ -1839,6 +1841,11 @@ def read_file(
             "DCD files are trajectories; open them with read_file_trajectory "
             "(or the TUI / --msd / --rdf)."
         )
+    elif ft == "ase_traj":
+        raise ValueError(
+            "ASE .traj files are trajectories; open them with read_file_trajectory "
+            "(or the viewers / --msd / --rdf)."
+        )
     else:
         raise ValueError(f"Unknown filetype: {ft}")
 
@@ -1868,6 +1875,9 @@ def read_file_trajectory(filepath: str) -> list[Molecule] | None:
     elif ft == "dcd":
         from pdb_wizard.dcd import check_dcd_trajectory
         is_traj = check_dcd_trajectory(filepath)
+    elif ft == "ase_traj":
+        from pdb_wizard.ase_traj import check_ase_trajectory
+        is_traj = check_ase_trajectory(filepath)
     if not is_traj:
         return None
 
@@ -1880,6 +1890,9 @@ def read_file_trajectory(filepath: str) -> list[Molecule] | None:
     elif ft == "dcd":
         from pdb_wizard.dcd import read_dcd_trajectory
         mols, _ = read_dcd_trajectory(filepath)
+    elif ft == "ase_traj":
+        from pdb_wizard.ase_traj import read_ase_trajectory
+        mols, _ = read_ase_trajectory(filepath)
     else:
         return None
 
