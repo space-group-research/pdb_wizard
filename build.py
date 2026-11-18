@@ -7,6 +7,7 @@ imports, deduplicates external imports, and writes a single dist/pdb_wizard.py.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -306,6 +307,23 @@ def minified_problem_for_old_python(source: str) -> str:
     return ""
 
 
+def _write_whole_file(path: Path, text: str) -> None:
+    """Put ``text`` at ``path`` as an executable file, in one step.
+
+    Written beside the target and then renamed over it, so anything running or reading the
+    old file while the build runs sees either the old file or the new one, never a half
+    written one (tests that run the single file in parallel with a rebuild failed with
+    "SyntaxError: EOF while scanning" on a truncated copy)."""
+    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
+    try:
+        tmp.write_text(text)
+        tmp.chmod(0o755)
+        os.replace(str(tmp), str(path))
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def build() -> None:
     DIST_DIR.mkdir(exist_ok=True)
 
@@ -381,8 +399,7 @@ def build() -> None:
 
     # Full version
     out_path = DIST_DIR / "pdb_wizard.py"
-    out_path.write_text(full_source)
-    out_path.chmod(0o755)
+    _write_whole_file(out_path, full_source)
     print(f"Built {out_path} ({len(full_source)} bytes)")
 
     # Minified version
@@ -416,8 +433,7 @@ def build() -> None:
                   f"{OLDEST_PYTHON[0]}.{OLDEST_PYTHON[1]} ({problem}). "
                   f"Build with an older Python to get {min_path.name}.")
             return
-        min_path.write_text(minified)
-        min_path.chmod(0o755)
+        _write_whole_file(min_path, minified)
         ratio = len(minified) / len(full_source) * 100
         print(f"Built {min_path} ({len(minified)} bytes, {ratio:.0f}% of original)")
     except ImportError:
