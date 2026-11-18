@@ -190,3 +190,25 @@ class TestTextualFallback:
         assert "falling back to the classic text menu" in combined
         assert "NameError" not in combined
         assert "Could not read fake.cif" in combined  # run_classic reached
+
+
+def test_rebuild_never_leaves_a_half_written_file(tmp_path):
+    """Other tests (and users) run dist/pdb_wizard.py while a build may be rewriting it.
+    The build must swap the finished file in, not truncate the old one and refill it: a
+    reader that opened the old file keeps its whole text, and no temporary file is left."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pdbw_build_atomic", BUILD_DIR / "build.py")
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+
+    target = tmp_path / "pdb_wizard.py"
+    old = "print('old')\n" * 5000
+    target.write_text(old)
+    with open(target) as reader:
+        first = reader.read(10)
+        build._write_whole_file(target, "print('new')\n")
+        rest = reader.read()
+    assert first + rest == old  # the open copy was not cut short
+    assert target.read_text() == "print('new')\n"
+    assert target.stat().st_mode & 0o111  # still executable
+    assert [p.name for p in tmp_path.iterdir()] == ["pdb_wizard.py"]
